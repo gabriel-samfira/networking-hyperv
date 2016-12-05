@@ -17,3 +17,36 @@
 
 class NetworkingHyperVException(Exception):
     pass
+
+
+class DataProcessingError(NetworkingHyperVException):
+
+    """Base exception class for data processing related errors."""
+
+    pass
+
+
+class ServiceException(NetworkingHyperVException):
+
+    """Base exception for all the API interaction related errors."""
+
+    pass
+
+
+class NotFound(ServiceException):
+
+    """The required resource is not available."""
+
+    pass
+
+
+class CertificateVerifyFailed(ServiceException):
+
+    """The received certificate is not valid.
+
+    In order to avoid the current exception the validation of the SSL
+    certificate should be disabled for the metadata provider. In order
+    to do that the `https_allow_insecure` config option should be set.
+    """
+
+    pass

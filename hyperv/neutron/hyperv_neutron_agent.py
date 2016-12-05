@@ -32,6 +32,7 @@ from hyperv.neutron import _common_utils as c_util
 from hyperv.neutron import constants
 from hyperv.neutron import exception
 from hyperv.neutron import nvgre_ops
+from hyperv.neutron import sdn2_ops
 
 CONF = cfg.CONF
 CONF.import_group('NVGRE', 'hyperv.neutron.config')
@@ -72,6 +73,9 @@ networking-plugin-hyperv_agent.html
         self._port_metric_retries = {}
 
         self._nvgre_enabled = False
+        self._sdn2_enabled = False
+        self._sdn2_ops = None
+
         self._cache_lock = threading.Lock()
 
         conf = conf or {}
@@ -131,6 +135,14 @@ networking-plugin-hyperv_agent.html
         self._nvgre_ops.tunnel_update(self.context,
                                       CONF.NVGRE.provider_tunnel_ip,
                                       constants.TYPE_NVGRE)
+
+    def init_sdn2(self):
+
+        if not CONF.SDN2.enable_support:
+            return
+
+        self._sdn2_enabled = True
+        self._sdn2_ops = sdn2_ops.SDN2Operations()
 
     def _get_vswitch_for_physical_network(self, phys_network_name):
         for pattern in self._physical_network_mappings:
@@ -232,12 +244,13 @@ networking-plugin-hyperv_agent.html
         LOG.info(_LI("Reclaiming local network %s"), net_uuid)
         del self._network_vswitch_map[net_uuid]
 
-    def _port_bound(self, port_id,
-                    net_uuid,
-                    network_type,
-                    physical_network,
-                    segmentation_id):
+    def _port_bound(self, port_id, net_uuid, network_type, physical_network,
+                    segmentation_id, mac_address):
         LOG.debug("Binding port %s", port_id)
+        if self._sdn2_enabled:
+            self._sdn2_ops.bind_port(port_id, net_uuid, network_type,
+                                     physical_network, segmentation_id,
+                                     mac_address)
 
         if net_uuid not in self._network_vswitch_map:
             self._provision_network(
@@ -313,10 +326,12 @@ networking-plugin-hyperv_agent.html
     @_port_synchronized
     def _treat_vif_port(self, port_id, network_id, network_type,
                         physical_network, segmentation_id,
-                        admin_state_up):
+                        admin_state_up, mac_address):
         if admin_state_up:
             self._port_bound(port_id, network_id, network_type,
-                             physical_network, segmentation_id)
+                             physical_network, segmentation_id,
+                             mac_address)
+
             # check if security groups is enabled.
             # if not, teardown the security group rules
             if self.enable_security_groups:
@@ -337,7 +352,8 @@ networking-plugin-hyperv_agent.html
                                  device_details['network_type'],
                                  device_details['physical_network'],
                                  device_details['segmentation_id'],
-                                 device_details['admin_state_up'])
+                                 device_details['admin_state_up'],
+                                 device_details['mac_address'])
 
             LOG.debug("Updating cached port %s status as UP.", port_id)
             self._update_port_status_cache(device, device_bound=True)

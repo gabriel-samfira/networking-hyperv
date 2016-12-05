@@ -77,6 +77,7 @@ class HyperVNeutronAgent(hyperv_neutron_agent.HyperVNeutronAgentMixin):
         self._set_agent_state()
         self._setup_rpc()
         self.init_nvgre()
+        self.init_sdn2()
 
     def _set_agent_state(self):
         configurations = self._get_agent_configurations()
