@@ -95,21 +95,6 @@ NEUTRON_OPTS = [
                help='auth strategy for connecting to neutron in admin context')
 ]
 
-HNV_OPTS = [
-    cfg.StrOpt('network_controller_url',
-               default='https://127.0.0.1',
-               help='Microsoft network controller url'),
-    cfg.StrOpt('network_controller_cert',
-               default='',
-               help='Optional certificate to authenticate network controller'),
-    cfg.StrOpt('username',
-               default='',
-               help='Domain user with access rights to network controller'),
-    cfg.StrOpt('password',
-               default='',
-               help='Domain user password'),
-]
-
 cfg.CONF.register_opts(HYPERV_AGENT_OPTS, "AGENT")
 cfg.CONF.register_opts(NVGRE_OPTS, "NVGRE")
 cfg.CONF.register_opts(NEUTRON_OPTS, 'neutron')
