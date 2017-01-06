@@ -26,6 +26,8 @@ from neutron.callbacks import resources
 
 from hyperv.common.i18n import _, _LE, _LI  # noqa
 from hyperv.neutron import sdn2_client
+from hyperv.neutron import constants
+from hyperv.neutron import exception as hyperv_exc
 
 LOG = log.getLogger(__name__)
 
@@ -59,6 +61,20 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         called prior to this method being called.
         """
         LOG.info(_LI("Starting HNVMechanismDriver"))
+        # Initialize the logicalNetwork client
+        self._ln_client = sdn2_client.LogicalNetwork()
+        # Initialize the ACL client
+        self._acl_client = sdn2_client.AccessControlLists()
+        # Initialize virtualSubnet client
+        self._vs_client = sdn2_client.SubNetwork()
+        # Get logical network for overlay network encapsulation
+        self._logicalNetworkID = cfg.CONF.SDN2.logical_network
+        self._ln = self._get_logical_network(self._logicalNetworkID) 
+        # addressSpace is a mandatory parameter when creating a virtual network
+        # in the HNV network controller. We add a bogus address space when we
+        # create the initial virtual network. This gets removed when we add our
+        # first subnet.
+        self._dummy_address_space = sdn2_client.AddressSpace(address_prefixes=["1.0.0.0/32"])
 
     def _validate_segments(self, segment):
         network_type = segment['network_type']
@@ -76,7 +92,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if network_type != plugin_const.TYPE_VXLAN:
             msg = _('Network type %s is not supported') % network_type
             raise n_exc.InvalidInput(error_message=msg)
-
 
     def create_network_precommit(self, context):
         """Allocate resources for a new network.
@@ -99,12 +114,53 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             res = None
         return res
 
-    def _get_logical_network(self):
-        lnID = cfg.CONF.SDN2.
+    def _ensure_default_acl_exist(self):
+        """
+        There should be an ACL that mirrors the behavior of the default ACL in
+        OpenStack. If one does not already exist, we create one. This function
+        should not be called from inside any _precommit hook.
+        """
+        try:
+            default_acl = self._acl_client(resource_id=constants.HNV_DEFAULT_NETWORK)
+        except hyperv_exc.NotFound:
+            LOG.debug("Creating default ACL on HNV network controller")
+
+        allow_egress = sdn2_client.ACLRules(
+                resource_id="Allow_Egress",
+                action="Allow",
+                destination_prefix="*",
+                destination_port_range="*",
+                source_prefix="*",
+                source_port_range="*",
+                description="Allow all egress traffic",
+                priority="103", rule_type="Outbound")
+        default_acl = sdn2_client.AccessControlLists(
+                acl_rules=[allow_egress.dump(),],
+                resource_id=constants.HNV_DEFAULT_NETWORK,
+                inbound_action="Deny")
+        default_acl.commit()
+
+    def _get_logical_network(self, network):
+        ln = self._ln_client.get(resource_id=lnID)
+        if ln.network_virtualization_enabled != u'True':
+            msg = _('The configured logical network does not support virtualization') % lnID
+            raise n_exc.InvalidInput(error_message=msg)
+        return ln
 
     def _create_network_on_nc(self, network):
         virtualNetworkID = network["id"]
-
+        try:
+            vn = self._vs_client(resource_id=virtualNetworkID)
+            return vn
+        except hyperv_exc.NotFound:
+            LOG.debug("Creating virtual network %(network_id)s on network controller" % {
+                'network_id': virtualNetworkID,
+                })
+        vn = sdn2_client.VirtualNetworks(
+                resource_id=virtualNetworkID,
+                address_space=self._dummy_address_space,
+                logical_network=self._ln).commit(wait=True)
+        return vn
 
     def create_network_postcommit(self, context):
         """Create a network.
@@ -118,8 +174,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cause the deletion of the resource.
         """
         network = context.current
-        physical_network = self._get_attribute(network, pnet.PHYSICAL_NETWORK)
-
+        self._create_network_on_nc(network)
 
     def update_network_precommit(self, context):
         """Update resources of a network.

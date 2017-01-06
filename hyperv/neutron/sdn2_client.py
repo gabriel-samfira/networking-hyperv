@@ -390,7 +390,7 @@ class LogicalNetworks(_BaseSDNModel):
     """Indicates the various states of the resource. Valid values are
     Deleting, Failed, Succeeded, and Updating."""
 
-    subnetwors = objects.Field(name="subnetwors", key="subnets",
+    subnetworks = objects.Field(name="subnetworks", key="subnets",
                                is_required=False, default=[])
     """Indicates the subnets that are contained in the logical network."""
 

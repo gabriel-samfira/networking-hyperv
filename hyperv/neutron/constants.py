@@ -32,3 +32,5 @@ TYPE_VLAN = 'vlan'
 TYPE_NVGRE = 'gre'
 
 IPV4_DEFAULT = '0.0.0.0'
+
+HNV_DEFAULT_NETWORK = "Neutron_Default"

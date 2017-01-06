@@ -118,6 +118,10 @@ SDN2_OPTS = [
         "https_ca_bundle", default=None,
         help="The path to a CA_BUNDLE file or directory with "
              "certificates of trusted CAs."),
+    cfg.StrOpt(
+        "logical_network", default=None, required=True,
+        help="This is the logical network on top of which tenant network "
+             "traffic will be encapsulated."),
 ]
 
 cfg.CONF.register_opts(HYPERV_AGENT_OPTS, "AGENT")
