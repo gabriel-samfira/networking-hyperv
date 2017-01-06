@@ -13,12 +13,21 @@
 #
 
 from oslo_config import cfg
+from oslo_log import log
+
+from neutron_lib import exceptions as n_exc
 
 from neutron.plugins.ml2 import driver_api
+from neutron.plugins.common import constants as plugin_const
 
 from neutron.callbacks import events
 from neutron.callbacks import registry
 from neutron.callbacks import resources
+
+from hyperv.common.i18n import _, _LE, _LI  # noqa
+from hyperv.neutron import sdn2_client
+
+LOG = log.getLogger(__name__)
 
 
 class HNVMechanismDriver(driver_api.MechanismDriver):
@@ -50,16 +59,24 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         called prior to this method being called.
         """
         LOG.info(_LI("Starting HNVMechanismDriver"))
-        self._nb_ovn = None
-        self._sb_ovn = None
-        self._plugin_property = None
-        self.sg_enabled = ovn_acl.is_sg_enabled()
-        if cfg.CONF.SECURITYGROUP.firewall_driver:
-            LOG.warning(_LW('Firewall driver configuration is ignored'))
-        self._setup_vif_port_bindings()
-        self.subscribe()
-        self.qos_driver = qos_driver.OVNQosDriver(self)
-        self.trunk_driver = trunk_driver.OVNTrunkDriver.create(self)
+
+    def _validate_segments(self, segment):
+        network_type = segment['network_type']
+        # TODO(gsamfira): So far I have found no way to get or set
+        # this via API calls. The only way I managed to get the allocated
+        # segmentation ID was by 
+        segmentation_id = segment['segmentation_id']
+        LOG.debug('Validating network segment with '
+                      'type %(network_type)s, '
+                      'segmentation ID %(segmentation_id)s, '
+                      'physical network %(physical_network)s' %
+                      {'network_type': network_type,
+                       'segmentation_id': segmentation_id,
+                       'physical_network': physical_network})
+        if network_type != plugin_const.TYPE_VXLAN:
+            msg = _('Network type %s is not supported') % network_type
+            raise n_exc.InvalidInput(error_message=msg)
+
 
     def create_network_precommit(self, context):
         """Allocate resources for a new network.
@@ -72,7 +89,22 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cannot block.  Raising an exception will result in a rollback
         of the current transaction.
         """
-        pass
+        segments = context.network_segments
+        for segment in segments:
+            self._validate_segments(segment)
+
+    def _get_attribute(self, obj, attribute):
+        res = obj.get(attribute)
+        if res is const.ATTR_NOT_SPECIFIED:
+            res = None
+        return res
+
+    def _get_logical_network(self):
+        lnID = cfg.CONF.SDN2.
+
+    def _create_network_on_nc(self, network):
+        virtualNetworkID = network["id"]
+
 
     def create_network_postcommit(self, context):
         """Create a network.
@@ -85,7 +117,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         drastically affect performance. Raising an exception will
         cause the deletion of the resource.
         """
-        pass
+        network = context.current
+        physical_network = self._get_attribute(network, pnet.PHYSICAL_NETWORK)
+
 
     def update_network_precommit(self, context):
         """Update resources of a network.

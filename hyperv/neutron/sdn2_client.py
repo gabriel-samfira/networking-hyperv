@@ -171,7 +171,7 @@ class _BaseSDNModel(objects.Model):
             return cls.from_raw_data(raw_data)
 
     @classmethod
-    def remove(cls, resource_id, parent_id):
+    def remove(cls, resource_id, parent_id=None):
         """Delete the required resource.
 
         :param resource_id:      The identifier for the specific resource
@@ -183,7 +183,6 @@ class _BaseSDNModel(objects.Model):
                                         parent_id=parent_id or "")
         cls._client.remove_resource(endpoint)
 
-    def _
     def commit(self, wait=False):
         """Apply all the changes on the current model."""
         super(_BaseSDNModel, self).commit()
