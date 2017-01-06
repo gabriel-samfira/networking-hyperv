@@ -55,7 +55,7 @@ HYPERV_AGENT_OPTS = [
     cfg.IPOpt('neutron_metadata_address',
               default='169.254.169.254',
               help=_('Specifies the address which will serve the metadata for'
-                      ' the instance.')),
+                     ' the instance.')),
 ]
 
 NVGRE_OPTS = [
@@ -95,6 +95,32 @@ NEUTRON_OPTS = [
                help='auth strategy for connecting to neutron in admin context')
 ]
 
+SDN2_OPTS = [
+    cfg.BoolOpt(
+        'enable_support', default=False,
+        help=_('Enables SDN 2.0. Requires Windows Server 2016 or above.')),
+    cfg.StrOpt(
+        "url", default="http://127.0.0.1/",
+        help="The base URL where the agent looks for Network Controller API."),
+    cfg.StrOpt(
+        'username',
+        help="The username required for connecting to the Netowork "
+             "Controller API."),
+    cfg.StrOpt(
+        'password',
+        help="The password required for connecting to the Netowork "
+             "Controller API.",
+        secret=True),
+    cfg.BoolOpt(
+        "https_allow_insecure", default=False,
+        help="Whether to disable the validation of HTTPS certificates."),
+    cfg.StrOpt(
+        "https_ca_bundle", default=None,
+        help="The path to a CA_BUNDLE file or directory with "
+             "certificates of trusted CAs."),
+]
+
 cfg.CONF.register_opts(HYPERV_AGENT_OPTS, "AGENT")
 cfg.CONF.register_opts(NVGRE_OPTS, "NVGRE")
 cfg.CONF.register_opts(NEUTRON_OPTS, 'neutron')
+cfg.CONF.register_opts(SDN2_OPTS, 'SDN2')
