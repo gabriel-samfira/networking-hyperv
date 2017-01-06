@@ -114,7 +114,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             res = None
         return res
 
-    def _ensure_default_acl_exist(self):
+    def _ensure_default_acl(self):
         """
         There should be an ACL that mirrors the behavior of the default ACL in
         OpenStack. If one does not already exist, we create one. This function
@@ -122,6 +122,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         try:
             default_acl = self._acl_client(resource_id=constants.HNV_DEFAULT_NETWORK)
+            return default_acl
         except hyperv_exc.NotFound:
             LOG.debug("Creating default ACL on HNV network controller")
 
@@ -137,8 +138,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         default_acl = sdn2_client.AccessControlLists(
                 acl_rules=[allow_egress.dump(),],
                 resource_id=constants.HNV_DEFAULT_NETWORK,
-                inbound_action="Deny")
-        default_acl.commit()
+                inbound_action="Deny",
+                outbound_action="Allow")
+        default_acl.commit(wait=True)
+        return default_acl
 
     def _get_logical_network(self, network):
         ln = self._ln_client.get(resource_id=lnID)
@@ -192,6 +195,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         network state. It is up to the mechanism driver to ignore
         state or state changes that it does not know or care about.
         """
+        #Nothing to do fornetwork  update operations. Leaving this as a
+        #placeholder for later use
         pass
 
     def update_network_postcommit(self, context):
@@ -210,6 +215,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         network state.  It is up to the mechanism driver to ignore
         state or state changes that it does not know or care about.
         """
+        #Nothing to do for network update operations. Leaving this as a
+        #placeholder for later use
         pass
 
     def delete_network_precommit(self, context):
@@ -224,6 +231,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         raising an exception will result in rollback of the
         transaction.
         """
+        #Leaving here for later use
         pass
 
     def delete_network_postcommit(self, context):
@@ -238,7 +246,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         expected, and will not prevent the resource from being
         deleted.
         """
-        pass
+        network = context.current
+        self._vs_client.remove(resource_id=network['id'])
 
     def create_subnet_precommit(self, context):
         """Allocate resources for a new subnet.
@@ -251,6 +260,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cannot block.  Raising an exception will result in a rollback
         of the current transaction.
         """
+        # Leaving here for later use
         pass
 
     def create_subnet_postcommit(self, context):
@@ -264,7 +274,29 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         drastically affect performance. Raising an exception will
         cause the deletion of the resource.
         """
-        pass
+        subnet = context.current
+        # HNV does not allow setting the gateway IP. It automatically allocates
+        # the lowest IP address from a subnet as a router IP which gets configured
+        # on the distributed router configured by HNV.
+        gatewayIP = subnet["gateway_ip"]
+        network_id = subnet["network_id"]
+        subnet_id = subnet["id"]
+        subnet_cidr = subnet["cidr"]
+        dummy_prefix = self._dummy_address_space.address_prefixes[0]
+        try:
+            subnet = sdn2_client.SubNetwork.get(resource_id=subnet_id, parent_id=network_id)
+        except hyperv_exc.NotFound:
+            LOG.debug("Creating subnet %(subnet_id)s on virtual network %(virtual_network)s" % {
+                'subnet_id': subnet_id,
+                'virtual_network': network_id})
+        virtualNetwork = sdn2_client.VirtualNetworks.get(resource_id=network_id)
+        if subnet_cidr not in virtualNetwork.address_space["addressPrefixes"]:
+            virtualNetwork.address_space["addressPrefixes"].append(subnet_cidr)
+        if dummy_prefix in virtualNetwork.address_space["addressPrefixes"]:
+            virtualNetwork.address_space["addressPrefixes"].remove(subnet_cidr)
+
+        subnet = sdn2_client.SubNetwork(resource_id=subnet_id, address_prefix=subnet_cidr)
+                                                            
 
     def update_subnet_precommit(self, context):
         """Update resources of a subnet.

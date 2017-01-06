@@ -41,17 +41,20 @@ class _BaseClient(object):
         self._https_ca_bundle = CONF.SDN2.https_ca_bundle
 
     @staticmethod
-    def _get_headers():
+    def _get_headers(etag=None):
         """Prepare the HTTP headers for the current request."""
 
         # TODO(alexcoman): Add the x-ms-client-ip-address header in order
         # to improve the Network Controller requests logging.
-        return {
+        headers = {
             "Accept": "application/json",
             "Content-Type": "application/json; charset=UTF-8",
             "x-ms-client-request-id": uuid.uuid1().hex,
             "x-ms-return-client-request-id": "1",
         }
+        if etag:
+            headers["If-Match"] = etag
+        return headers
 
     def _verify_https_request(self):
         """Whether to disable the validation of HTTPS certificates.
@@ -67,10 +70,10 @@ class _BaseClient(object):
         else:
             return not self._https_allow_insecure
 
-    def _http_request(self, resource, method="GET", body=None):
+    def _http_request(self, resource, method="GET", body=None, etag=None):
         url = requests.compat.urljoin(self._base_url, resource)
         response = requests.request(method=method, url=url, data=body,
-                                    headers=self._get_headers(),
+                                    headers=self._get_headers(etag),
                                     auth=self._credentials,
                                     verify=self._verify_https_request())
 
@@ -97,11 +100,11 @@ class _BaseClient(object):
 
         return response
 
-    def update_resource(self, path, data):
+    def update_resource(self, path, data, etag=None):
         """Update the required resource."""
         try:
             response = self._http_request(path, method="PUT",
-                                          body=json.dumps(data))
+                                          body=json.dumps(data), etag=etag)
         except requests.exceptions.SSLError as exc:
             LOG.error(exc)
             raise exception.CertificateVerifyFailed(
@@ -189,7 +192,8 @@ class _BaseSDNModel(objects.Model):
         endpoint = self._endpoint.format(resource_id=self.resource_id or "",
                                          parent_id=self.parent_id or "")
         request_body = self.dump(include_read_only=False)
-        response = self._client.update_resource(endpoint, data=request_body)
+        etag = getattr(self, "etag") or None
+        response = self._client.update_resource(endpoint, data=request_body, etag=etag)
         return self.from_raw_data(response)
 
 
