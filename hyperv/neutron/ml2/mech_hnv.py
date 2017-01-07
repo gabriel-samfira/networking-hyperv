@@ -263,6 +263,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # Leaving here for later use
         pass
 
+    def _append_subnet_to_address_space(self, virtualNetwork, cidr):
+        dummy_prefix = self._dummy_address_space.address_prefixes[0]
+        if cidr not in virtualNetwork.address_space["addressPrefixes"]:
+            virtualNetwork.address_space["addressPrefixes"].append(cidr)
+        if dummy_prefix in virtualNetwork.address_space["addressPrefixes"]:
+            virtualNetwork.address_space["addressPrefixes"].remove(cidr)
+        return virtualNetwork.commit(wait=True)
+
     def create_subnet_postcommit(self, context):
         """Create a subnet.
 
@@ -289,14 +297,17 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             LOG.debug("Creating subnet %(subnet_id)s on virtual network %(virtual_network)s" % {
                 'subnet_id': subnet_id,
                 'virtual_network': network_id})
-        virtualNetwork = sdn2_client.VirtualNetworks.get(resource_id=network_id)
-        if subnet_cidr not in virtualNetwork.address_space["addressPrefixes"]:
-            virtualNetwork.address_space["addressPrefixes"].append(subnet_cidr)
-        if dummy_prefix in virtualNetwork.address_space["addressPrefixes"]:
-            virtualNetwork.address_space["addressPrefixes"].remove(subnet_cidr)
-
+        for i in range(0, 10):
+            virtualNetwork = sdn2_client.VirtualNetworks.get(resource_id=network_id)
+            try:
+                virtualNetwork = self._append_subnet_to_address_space(virtualNetwork, subnet_cidr)
+            except requests.exceptions.HTTPError as err:
+                if err.response.status_code == 412:
+                    LOG.warning("Virtual network %s changed while we were "
+                                "updating. Retrying" % virtualNetwork.resource_id)
+                    continue
         subnet = sdn2_client.SubNetwork(resource_id=subnet_id, address_prefix=subnet_cidr)
-                                                            
+        #TODO(gsamfira): finish adding subnet to virtual network
 
     def update_subnet_precommit(self, context):
         """Update resources of a subnet.
