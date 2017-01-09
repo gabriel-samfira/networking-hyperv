@@ -14,6 +14,7 @@
 
 import uuid
 import json
+import eventlet
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -174,7 +175,7 @@ class _BaseSDNModel(objects.Model):
             return cls.from_raw_data(raw_data)
 
     @classmethod
-    def remove(cls, resource_id, parent_id=None):
+    def remove(cls, resource_id, parent_id=None, wait=True):
         """Delete the required resource.
 
         :param resource_id:      The identifier for the specific resource
@@ -185,6 +186,14 @@ class _BaseSDNModel(objects.Model):
         endpoint = cls._endpoint.format(resource_id=resource_id or "",
                                         parent_id=parent_id or "")
         cls._client.remove_resource(endpoint)
+        if wait:
+            while True:
+                try:
+                    cls.get(resource_id=resource_id, parent_id=parent_id)
+                except exception.NotFound:
+                    return
+                eventlet.sleep(1)
+
 
     def commit(self, wait=False):
         """Apply all the changes on the current model."""
@@ -194,7 +203,17 @@ class _BaseSDNModel(objects.Model):
         request_body = self.dump(include_read_only=False)
         etag = getattr(self, "etag") or None
         response = self._client.update_resource(endpoint, data=request_body, etag=etag)
-        return self.from_raw_data(response)
+        data = self.from_raw_data(response)
+        if wait:
+            while True:
+                LOG.debug(">>> ProvisioningState is %r" % data.provisioning_state)
+                if data.provisioning_state == u'Updating':
+                    eventlet.sleep(1)
+                else:
+                    break
+                response = self._client.get_resource(endpoint)
+                data = self.from_raw_data(response)
+        return data
 
 
 class AccessControlLists(_BaseSDNModel):

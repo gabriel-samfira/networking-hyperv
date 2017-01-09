@@ -12,6 +12,9 @@
 #    under the License.
 #
 
+import requests
+from requests.status_codes import codes
+
 from oslo_config import cfg
 from oslo_log import log
 
@@ -30,7 +33,26 @@ from hyperv.neutron import constants
 from hyperv.neutron import exception as hyperv_exc
 
 LOG = log.getLogger(__name__)
+CONF = cfg.CONF
 
+def retry_on_http_error(code, tries=5):
+    def deco_retry(f):
+        def f_retry(*args, **kwargs):
+            mtries = tries
+            if mtries <= 1:
+                return f(*args, **kwargs)
+            while mtries-1 > 0:
+                try:
+                    return f(*args, **kwargs)
+                except requests.exceptions.HTTPError as err:
+                    if err.response.status_code == code:
+                        LOG.debug("Resource changed while we were updating")
+                        mtries -= 1
+                    else:
+                        raise err
+            return f(*args, **kwargs)
+        return f_retry
+    return deco_retry
 
 class HNVMechanismDriver(driver_api.MechanismDriver):
     """Hyper-V Network Virtualization driver.
@@ -62,11 +84,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         LOG.info(_LI("Starting HNVMechanismDriver"))
         # Initialize the logicalNetwork client
-        self._ln_client = sdn2_client.LogicalNetwork()
+        self._ln_client = sdn2_client.LogicalNetworks()
         # Initialize the ACL client
         self._acl_client = sdn2_client.AccessControlLists()
         # Initialize virtualSubnet client
         self._vs_client = sdn2_client.SubNetwork()
+        #Initialize VirtualNetworks cloent
+        self._vn_client = sdn2_client.VirtualNetworks()
         # Get logical network for overlay network encapsulation
         self._logicalNetworkID = cfg.CONF.SDN2.logical_network
         self._ln = self._get_logical_network(self._logicalNetworkID) 
@@ -84,11 +108,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         segmentation_id = segment['segmentation_id']
         LOG.debug('Validating network segment with '
                       'type %(network_type)s, '
-                      'segmentation ID %(segmentation_id)s, '
-                      'physical network %(physical_network)s' %
+                      'segmentation ID %(segmentation_id)s.' %
                       {'network_type': network_type,
-                       'segmentation_id': segmentation_id,
-                       'physical_network': physical_network})
+                       'segmentation_id': segmentation_id})
         if network_type != plugin_const.TYPE_VXLAN:
             msg = _('Network type %s is not supported') % network_type
             raise n_exc.InvalidInput(error_message=msg)
@@ -144,25 +166,27 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return default_acl
 
     def _get_logical_network(self, network):
-        ln = self._ln_client.get(resource_id=lnID)
+        ln = self._ln_client.get(resource_id=self._logicalNetworkID)
         if ln.network_virtualization_enabled != u'True':
-            msg = _('The configured logical network does not support virtualization') % lnID
+            msg = _("The configured logical network "
+                    "does not support virtualization") % self._logicalNetworkID
             raise n_exc.InvalidInput(error_message=msg)
         return ln
 
     def _create_network_on_nc(self, network):
         virtualNetworkID = network["id"]
         try:
-            vn = self._vs_client(resource_id=virtualNetworkID)
+            vn = self._vn_client.get(resource_id=virtualNetworkID)
             return vn
         except hyperv_exc.NotFound:
             LOG.debug("Creating virtual network %(network_id)s on network controller" % {
                 'network_id': virtualNetworkID,
                 })
+        ln_resource = sdn2_client.Resource(resource_ref=self._ln.resource_ref)
         vn = sdn2_client.VirtualNetworks(
                 resource_id=virtualNetworkID,
                 address_space=self._dummy_address_space,
-                logical_network=self._ln).commit(wait=True)
+                logical_network=ln_resource).commit(wait=True)
         return vn
 
     def create_network_postcommit(self, context):
@@ -247,7 +271,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         deleted.
         """
         network = context.current
-        self._vs_client.remove(resource_id=network['id'])
+        self._vn_client.remove(resource_id=network['id'])
 
     def create_subnet_precommit(self, context):
         """Allocate resources for a new subnet.
@@ -263,13 +287,36 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # Leaving here for later use
         pass
 
-    def _append_subnet_to_address_space(self, virtualNetwork, cidr):
+    # if etag changes between the GET call and the commit call
+    # the API will throw a 412 error. We fetch the resource again and attempt
+    # to modify it
+    @retry_on_http_error(code=codes.precondition_failed)
+    def _add_subnet_to_virtual_network(self, network_id, subnet_id, cidr):
+        try:
+            subnet_exists = self._vs_client.get(
+                    parent_id=network_id,
+                    resource_id=subnet_id)
+            return
+        except hyperv_exc.NotFound:
+            LOG.debug("Creating virtual subnet %(subnet_id)s on virtual "
+                      "network %(network_id)s with cids %(cidr)s" % {
+                'network_id': network_id,
+                'subnet_id': subnet_id,
+                'cidr': cidr,
+                })
+        virtualNetwork = sdn2_client.VirtualNetworks.get(resource_id=network_id)
+        subnet = sdn2_client.SubNetwork(resource_id=subnet_id, address_prefix=cidr)
         dummy_prefix = self._dummy_address_space.address_prefixes[0]
         if cidr not in virtualNetwork.address_space["addressPrefixes"]:
             virtualNetwork.address_space["addressPrefixes"].append(cidr)
         if dummy_prefix in virtualNetwork.address_space["addressPrefixes"]:
-            virtualNetwork.address_space["addressPrefixes"].remove(cidr)
-        return virtualNetwork.commit(wait=True)
+            virtualNetwork.address_space["addressPrefixes"].remove(dummy_prefix)
+        if virtualNetwork.subnetworks is None:
+            virtualNetwork.subnetworks = [subnet.dump(),]
+        else:
+            virtualNetwork.subnetworks.append(subnet.dump())
+        virtualNetwork.commit(wait=True)
+        return
 
     def create_subnet_postcommit(self, context):
         """Create a subnet.
@@ -290,24 +337,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         network_id = subnet["network_id"]
         subnet_id = subnet["id"]
         subnet_cidr = subnet["cidr"]
-        dummy_prefix = self._dummy_address_space.address_prefixes[0]
-        try:
-            subnet = sdn2_client.SubNetwork.get(resource_id=subnet_id, parent_id=network_id)
-        except hyperv_exc.NotFound:
-            LOG.debug("Creating subnet %(subnet_id)s on virtual network %(virtual_network)s" % {
-                'subnet_id': subnet_id,
-                'virtual_network': network_id})
-        for i in range(0, 10):
-            virtualNetwork = sdn2_client.VirtualNetworks.get(resource_id=network_id)
-            try:
-                virtualNetwork = self._append_subnet_to_address_space(virtualNetwork, subnet_cidr)
-            except requests.exceptions.HTTPError as err:
-                if err.response.status_code == 412:
-                    LOG.warning("Virtual network %s changed while we were "
-                                "updating. Retrying" % virtualNetwork.resource_id)
-                    continue
-        subnet = sdn2_client.SubNetwork(resource_id=subnet_id, address_prefix=subnet_cidr)
-        #TODO(gsamfira): finish adding subnet to virtual network
+        self._add_subnet_to_virtual_network(network_id, subnet_id, subnet_cidr)
 
     def update_subnet_precommit(self, context):
         """Update resources of a subnet.
@@ -359,6 +389,29 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         pass
 
+    @retry_on_http_error(code=codes.precondition_failed)
+    def _remove_address_prefix_from_virtual_network(self, network_id, cidr):
+        try:
+            virtualNetwork = self._vn_client.get(resource_id=network_id)
+        except hyperv_exc.NotFound:
+            return
+        dummy_prefix = self._dummy_address_space.address_prefixes[0]
+        if cidr in virtualNetwork.address_space["addressPrefixes"]:
+            virtualNetwork.address_space["addressPrefixes"].remove(cidr)
+        # address space cannot be null or empty
+        if len(virtualNetwork.address_space["addressPrefixes"]) == 0:
+            virtualNetwork.address_space["addressPrefixes"].append(dummy_prefix)
+        virtualNetwork.commit()
+        
+    def _remove_subnet_from_virtual_network(self, network_id, subnet_id):
+        #import pdb; pdb.set_trace()
+        try:
+            exists = self._vs_client.get(resource_id=subnet_id, parent_id=network_id)
+        except hyperv_exc.NotFound:
+            return
+        self._vs_client.remove(resource_id=subnet_id, parent_id=network_id, wait=True)
+        self._remove_address_prefix_from_virtual_network(network_id, exists.address_prefix)
+
     def delete_subnet_postcommit(self, context):
         """Delete a subnet.
 
@@ -371,7 +424,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         expected, and will not prevent the resource from being
         deleted.
         """
-        pass
+        subnet = context.current
+        network_id = subnet["network_id"]
+        subnet_id = subnet["id"]
+        self._remove_subnet_from_virtual_network(network_id, subnet_id)
 
     def create_port_precommit(self, context):
         """Allocate resources for a new port.
@@ -458,61 +514,48 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         pass
 
-    def bind_port(self, context):
-        """Attempt to bind a port.
-
-        :param context: PortContext instance describing the port
-
-        This method is called outside any transaction to attempt to
-        establish a port binding using this mechanism driver. Bindings
-        may be created at each of multiple levels of a hierarchical
-        network, and are established from the top level downward. At
-        each level, the mechanism driver determines whether it can
-        bind to any of the network segments in the
-        context.segments_to_bind property, based on the value of the
-        context.host property, any relevant port or network
-        attributes, and its own knowledge of the network topology. At
-        the top level, context.segments_to_bind contains the static
-        segments of the port's network. At each lower level of
-        binding, it contains static or dynamic segments supplied by
-        the driver that bound at the level above. If the driver is
-        able to complete the binding of the port to any segment in
-        context.segments_to_bind, it must call context.set_binding
-        with the binding details. If it can partially bind the port,
-        it must call context.continue_binding with the network
-        segments to be used to bind at the next lower level.
-
-        If the binding results are committed after bind_port returns,
-        they will be seen by all mechanism drivers as
-        update_port_precommit and update_port_postcommit calls. But if
-        some other thread or process concurrently binds or updates the
-        port, these binding results will not be committed, and
-        update_port_precommit and update_port_postcommit will not be
-        called on the mechanism drivers with these results. Because
-        binding results can be discarded rather than committed,
-        drivers should avoid making persistent state changes in
-        bind_port, or else must ensure that such state changes are
-        eventually cleaned up.
-
-        Implementing this method explicitly declares the mechanism
-        driver as having the intention to bind ports. This is inspected
-        by the QoS service to identify the available QoS rules you
-        can use with ports.
-        """
-        pass
-
-    @property
-    def _supports_port_binding(self):
-        return self.__class__.bind_port != MechanismDriver.bind_port
-
-    def check_vlan_transparency(self, context):
-        """Check if the network supports vlan transparency.
-
-        :param context: NetworkContext instance describing the network.
-
-        Check if the network supports vlan transparency or not.
-        """
-        pass
+#    def bind_port(self, context):
+#        """Attempt to bind a port.
+#
+#        :param context: PortContext instance describing the port
+#
+#        This method is called outside any transaction to attempt to
+#        establish a port binding using this mechanism driver. Bindings
+#        may be created at each of multiple levels of a hierarchical
+#        network, and are established from the top level downward. At
+#        each level, the mechanism driver determines whether it can
+#        bind to any of the network segments in the
+#        context.segments_to_bind property, based on the value of the
+#        context.host property, any relevant port or network
+#        attributes, and its own knowledge of the network topology. At
+#        the top level, context.segments_to_bind contains the static
+#        segments of the port's network. At each lower level of
+#        binding, it contains static or dynamic segments supplied by
+#        the driver that bound at the level above. If the driver is
+#        able to complete the binding of the port to any segment in
+#        context.segments_to_bind, it must call context.set_binding
+#        with the binding details. If it can partially bind the port,
+#        it must call context.continue_binding with the network
+#        segments to be used to bind at the next lower level.
+#
+#        If the binding results are committed after bind_port returns,
+#        they will be seen by all mechanism drivers as
+#        update_port_precommit and update_port_postcommit calls. But if
+#        some other thread or process concurrently binds or updates the
+#        port, these binding results will not be committed, and
+#        update_port_precommit and update_port_postcommit will not be
+#        called on the mechanism drivers with these results. Because
+#        binding results can be discarded rather than committed,
+#        drivers should avoid making persistent state changes in
+#        bind_port, or else must ensure that such state changes are
+#        eventually cleaned up.
+#
+#        Implementing this method explicitly declares the mechanism
+#        driver as having the intention to bind ports. This is inspected
+#        by the QoS service to identify the available QoS rules you
+#        can use with ports.
+#        """
+#        pass
 
     def get_workers(self):
         """Get any NeutronWorker instances that should have their own process
@@ -522,21 +565,3 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         return ()
 
-    @classmethod
-    def is_host_filtering_supported(cls):
-        return (cls.filter_hosts_with_segment_access !=
-                MechanismDriver.filter_hosts_with_segment_access)
-
-    def filter_hosts_with_segment_access(
-            self, context, segments, candidate_hosts, agent_getter):
-        """Filter hosts with access to at least one segment.
-
-        :returns: a set with a subset of candidate_hosts.
-
-        A driver can overload this method to return a subset of candidate_hosts
-        with the ones with access to at least one segment.
-
-        Default implementation returns all hosts to disable filtering
-        (backward compatibility).
-        """
-        return candidate_hosts
