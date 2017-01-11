@@ -489,10 +489,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         drastically affect performance.  Raising an exception will
         result in the deletion of the resource.
         """
-        current = context.current
+        port = context.current
         network = context.network
-        LOG.debug(">>>create_current %r" % current)
-        LOG.debug(">>>create_network %r" % network)
+        instance_id = self._bind_port_on_network_controller(port, network)
+        self.vif_details[constants.HNV_PORT_PROFILE_ID] = instance_id
         pass
 
     def update_port_postcommit(self, context):
@@ -525,7 +525,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         expected, and will not prevent the resource from being
         deleted.
         """
-        pass
+        port = context.current
+        try:
+            sdn2_client.NetworkInterfaces.remove(resource_id=port["id"], wait=True)
+        except hnv_exception.NotFound:
+            pass
+        return
 
     def get_workers(self):
         """Get any NeutronWorker instances that should have their own process
@@ -534,6 +539,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         workers, can return a sequence of NeutronWorker instances.
         """
         return ()
+
     # TODO(gsamfira): IMPLEMENT_ME
     def _get_port_acl(self, port):
         return []
@@ -572,7 +578,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         subnet = self._plugin.get_subnet(admin_context, subnet_id)
         return subnet
 
-    def _get_nc_port_options(self, port, network):
+    def _bind_port_on_network_controller(self, port, network):
         port_id = port["id"]
         mac_address = port["mac_address"].replace(":", "").replace("-", "")
         nameservers = subnet['dns_nameservers']
@@ -605,6 +611,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
         if len(ipConfigurations) == 0:
             raise ValueError("Could not build valid IP address configurations")
+
         networkInterface = sdn2_client.NetworkInterfaces(
                 resource_id=port_id,
                 dns_settings=list(dns_servers),
@@ -612,6 +619,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 mac_address=mac_address,
                 mac_allocation_method=constants.HNV_METHOD_STATIC).commit(wait=True)
         return networkInterface.instance_id
+
+    def get_agent_logical_network(self, agent):
+        return agent['configurations'].get('logical_network', None)
 
     def bind_port(self, context):
         port = context.current
@@ -637,8 +647,23 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                        'host': context.host})
         for agent in agents:
             LOG.debug("Checking agent: %s", agent)
+            agent_ln = self.get_agent_logical_network(agent)
+            # TODO(gsamfira): investigate allowing multiple logical networks. May need changes
+            # to the VXLAN network type
+            if agent_ln != self._logicalNetworkID:
+                LOG.warning("Refusing to bind port %(pid)s to agent %(agent)s "
+                        "Agent does not have access to logical network %(ln)s", {
+                            'pid': context.current['id'],
+                            'agent': agent,
+                            'ln': self._logicalNetworkID})
+                continue
             if agent['alive']:
+                port[portbindings.VIF_DETAILS].update(self.vif_details)
+                port[portbindings.PROFILE].update(self.vif_details)
                 for segment in context.segments_to_bind:
+                    context.set_binding(segment[driver_api.ID],
+                            self.vif_type,
+                            self.vif_details)
                     if self.try_to_bind_segment_for_agent(context, segment,
                                                           agent):
                         LOG.debug("Bound using segment: %s", segment)

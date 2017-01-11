@@ -36,3 +36,4 @@ IPV4_DEFAULT = '0.0.0.0'
 HNV_DEFAULT_NETWORK = "Neutron_Default"
 HNV_IP_METHOD_STATIC = "Static"
 HNV_IP_METHOD_DYNAMIC = "Dynamic"
+HNV_PORT_PROFILE_ID = "port_profile_id"
