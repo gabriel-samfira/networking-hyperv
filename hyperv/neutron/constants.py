@@ -16,6 +16,7 @@
 # Topic for tunnel notifications between the plugin and agent
 AGENT_TOPIC = 'q-agent-notifier'
 AGENT_TYPE_HYPERV = 'HyperV agent'
+AGENT_TYPE_HNV = "HNV agent"
 VIF_TYPE_HYPERV = 'hyperv'
 
 TUNNEL = 'tunnel'
@@ -34,6 +35,6 @@ TYPE_NVGRE = 'gre'
 IPV4_DEFAULT = '0.0.0.0'
 
 HNV_DEFAULT_NETWORK = "Neutron_Default"
-HNV_IP_METHOD_STATIC = "Static"
-HNV_IP_METHOD_DYNAMIC = "Dynamic"
+HNV_METHOD_STATIC = "Static"
+HNV_METHOD_DYNAMIC = "Dynamic"
 HNV_PORT_PROFILE_ID = "port_profile_id"

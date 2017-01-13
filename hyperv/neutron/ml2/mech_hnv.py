@@ -20,13 +20,15 @@ from oslo_config import cfg
 from oslo_log import log
 
 from neutron_lib import exceptions as n_exc
+from neutron_lib import constants as const
+from neutron_lib.plugins import directory
 
 from neutron.plugins.ml2 import driver_api
 from neutron.plugins.common import constants as plugin_const
 from neutron.extensions import portbindings
 from neutron.db import provisioning_blocks
 from neutron.callbacks import resources
-from neutron import import manager
+from neutron import context as n_context
 
 from hyperv.common.i18n import _, _LE, _LI  # noqa
 from hnv_client import client as sdn2_client
@@ -88,6 +90,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         called prior to this method being called.
         """
         LOG.info(_LI("Starting HNVMechanismDriver"))
+        self._plugin_property = None
         # Initialize the logicalNetwork client
         self._ln_client = sdn2_client.LogicalNetworks()
         # Initialize the ACL client
@@ -104,13 +107,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # create the initial virtual network. This gets removed when we add our
         # first subnet.
         self._dummy_address_space = sdn2_client.AddressSpace(address_prefixes=["1.0.0.0/32"])
-        self.agent_type = constants.AGENT_TYPE_HYPERV
+        self.agent_type = constants.AGENT_TYPE_HNV
         self._setup_vif_port_bindings()
 
     @property
     def _plugin(self):
         if self._plugin_property is None:
-            self._plugin_property = manager.NeutronManager.get_plugin()
+            self._plugin_property = directory.get_plugin()
         return self._plugin_property
 
     def _setup_vif_port_bindings(self):
@@ -491,9 +494,15 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         network = context.network
-        instance_id = self._bind_port_on_network_controller(port, network)
+        LOG.debug(
+                "Creating port %(port)s bound to network %(network)s" % {
+                    'port': port["id"],
+                    'network': network.current["id"],
+                    }
+                )
+        instance_id = self._bind_port_on_network_controller(port, network.current)
         self.vif_details[constants.HNV_PORT_PROFILE_ID] = instance_id
-        pass
+        port[portbindings.VIF_DETAILS].update(self.vif_details)
 
     def update_port_postcommit(self, context):
         """Update a port.
@@ -542,7 +551,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
     # TODO(gsamfira): IMPLEMENT_ME
     def _get_port_acl(self, port):
-        return []
+        return None
 
     def _get_ip_resource_id(self, ip, port_id):
         address = ip.get("ip_address")
@@ -557,9 +566,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             cache = {}
         subnet_obj = cache.get(subnet_cache_key, False)
         if subnet_obj:
-            return subnet_obj
+            return (cache, subnet_obj)
         try:
-           subnet_obj = self._vs_client(resource_id=subnet_id, parent_id=network_id)
+           subnet_obj = self._vs_client.get(resource_id=subnet_id, parent_id=network_id)
            cache[subnet_cache_key] = subnet_obj 
         except hnv_exception.NotFound as err:
             LOG.error("Failed to find subnet with ID %(subnet_id)s on network "
@@ -580,8 +589,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
     def _bind_port_on_network_controller(self, port, network):
         port_id = port["id"]
-        mac_address = port["mac_address"].replace(":", "").replace("-", "")
-        nameservers = subnet['dns_nameservers']
+        mac_address = port["mac_address"].replace(":", "").replace("-", "").upper()
         network_id = network['id']
         cached_subnets = {}
         acl = self._get_port_acl(port)
@@ -590,17 +598,17 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # TODO(gsamfira): validate IP version
         for ip in port.get("fixed_ips", []):
             subnet_id = ip.get("subnet_id")
-            neutron_subnet = self._get_subnet_from_neutron()
+            neutron_subnet = self._get_subnet_from_neutron(subnet_id)
             if neutron_subnet.get("dns_nameservers"):
                 for i in neutron_subnet["dns_nameservers"]:
-                    dns_nameservers.add(i)
+                    dns_servers.add(i)
             cached_subnets, subnet_obj = self._get_subnet_from_cache(subnet_id, network_id, cached_subnets)
             if self._confirm_ip_in_subnet(ip["ip_address"], subnet_obj.address_prefix) is False:
                 # TODO(gsamfira): replace ValueError with module specific exception
                 raise ValueError("fixed_ip %s is not part of subnet %s" % (
                     ip["ip_address"], subnet_obj.address_prefix))
             resource_id = self._get_ip_resource_id(ip, port_id)
-            subnet_resource = sdn2_client.Resource(resource_id=subnet_obj.resource_ref)
+            subnet_resource = sdn2_client.Resource(resource_ref=subnet_obj.resource_ref)
             ipConfiguration = sdn2_client.IPConfiguration(
                     resource_id=resource_id,
                     private_ip_address=ip["ip_address"],
@@ -614,10 +622,16 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
         networkInterface = sdn2_client.NetworkInterfaces(
                 resource_id=port_id,
-                dns_settings=list(dns_servers),
+                instance_id=port_id,
+                dns_settings={"DnsServers": list(dns_servers)},
                 ip_configurations=ipConfigurations,
                 mac_address=mac_address,
-                mac_allocation_method=constants.HNV_METHOD_STATIC).commit(wait=True)
+                mac_allocation_method=constants.HNV_METHOD_STATIC)
+        LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)s" % {
+            'port_id': port_id,
+            'payload': json.dumps(networkInterface.dump()),
+            })
+        networkInterface = networkInterface.commit(wait=True)
         return networkInterface.instance_id
 
     def get_agent_logical_network(self, agent):
@@ -658,16 +672,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                             'ln': self._logicalNetworkID})
                 continue
             if agent['alive']:
-                port[portbindings.VIF_DETAILS].update(self.vif_details)
-                port[portbindings.PROFILE].update(self.vif_details)
                 for segment in context.segments_to_bind:
                     context.set_binding(segment[driver_api.ID],
                             self.vif_type,
                             self.vif_details)
-                    if self.try_to_bind_segment_for_agent(context, segment,
-                                                          agent):
-                        LOG.debug("Bound using segment: %s", segment)
-                        return
+                    LOG.debug("Bound using segment: %s", segment)
+                    return
             else:
                 LOG.warning(_LW("Refusing to bind port %(pid)s to dead agent: "
                                 "%(agent)s"),
