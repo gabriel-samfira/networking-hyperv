@@ -31,9 +31,11 @@ from neutron.callbacks import resources
 from neutron import context as n_context
 
 from hyperv.common.i18n import _, _LE, _LI  # noqa
-from hnv_client import client as sdn2_client
+from hnv_client import client
 from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
+from hyperv.ml2 import qos
+
 
 from hnv_client import config as hnv_config
 from hnv_client.common import exception as hnv_exception
@@ -92,13 +94,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         LOG.info(_LI("Starting HNVMechanismDriver"))
         self._plugin_property = None
         # Initialize the logicalNetwork client
-        self._ln_client = sdn2_client.LogicalNetworks()
+        self._ln_client = client.LogicalNetworks()
         # Initialize the ACL client
-        self._acl_client = sdn2_client.AccessControlLists()
+        self._acl_client = client.AccessControlLists()
         # Initialize virtualSubnet client
-        self._vs_client = sdn2_client.SubNetwork()
+        self._vs_client = client.SubNetwork()
         #Initialize VirtualNetworks cloent
-        self._vn_client = sdn2_client.VirtualNetworks()
+        self._vn_client = client.VirtualNetworks()
         # Get logical network for overlay network encapsulation
         self._logicalNetworkID = cfg.CONF.HNV.logical_network
         self._ln = self._get_logical_network(self._logicalNetworkID) 
@@ -106,9 +108,18 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # in the HNV network controller. We add a bogus address space when we
         # create the initial virtual network. This gets removed when we add our
         # first subnet.
-        self._dummy_address_space = sdn2_client.AddressSpace(address_prefixes=["1.0.0.0/32"])
+        self._dummy_address_space = client.AddressSpace(address_prefixes=["1.0.0.0/32"])
         self.agent_type = constants.AGENT_TYPE_HNV
         self._setup_vif_port_bindings()
+        self.qos = hnv_qos.HNVQosDriver(self)
+
+    def _get_nc_ports(self):
+        # TODO(gsamfira): maybe cache this value?
+        ports = client.NetworkInterfaces.get()
+        port_ids = {}
+        for i in ports:
+            port_ids[i.resource_id] = i
+        return port_ids
 
     @property
     def _plugin(self):
@@ -175,12 +186,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         for segment in segments:
             self._validate_segments(segment)
 
-    def _get_attribute(self, obj, attribute):
-        res = obj.get(attribute)
-        if res is const.ATTR_NOT_SPECIFIED:
-            res = None
-        return res
-
     def _ensure_default_acl(self):
         """
         There should be an ACL that mirrors the behavior of the default ACL in
@@ -193,7 +198,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         except hnv_exception.NotFound:
             LOG.debug("Creating default ACL on HNV network controller")
 
-        allow_egress = sdn2_client.ACLRules(
+        allow_egress = client.ACLRules(
                 resource_id="Allow_Egress",
                 action="Allow",
                 destination_prefix="*",
@@ -202,7 +207,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 source_port_range="*",
                 description="Allow all egress traffic",
                 priority="103", rule_type="Outbound")
-        default_acl = sdn2_client.AccessControlLists(
+        default_acl = client.AccessControlLists(
                 acl_rules=[allow_egress.dump(),],
                 resource_id=constants.HNV_DEFAULT_NETWORK,
                 inbound_action="Deny",
@@ -227,8 +232,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             LOG.debug("Creating virtual network %(network_id)s on network controller" % {
                 'network_id': virtualNetworkID,
                 })
-        ln_resource = sdn2_client.Resource(resource_ref=self._ln.resource_ref)
-        vn = sdn2_client.VirtualNetworks(
+        ln_resource = client.Resource(resource_ref=self._ln.resource_ref)
+        vn = client.VirtualNetworks(
                 resource_id=virtualNetworkID,
                 address_space=self._dummy_address_space,
                 logical_network=ln_resource).commit(wait=True)
@@ -264,9 +269,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         network state. It is up to the mechanism driver to ignore
         state or state changes that it does not know or care about.
         """
-        #Nothing to do fornetwork  update operations. Leaving this as a
-        #placeholder for later use
-        pass
+        segments = context.network_segments
+        for segment in segments:
+            self._validate_segments(segment)
 
     def update_network_postcommit(self, context):
         """Update a network.
@@ -284,9 +289,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         network state.  It is up to the mechanism driver to ignore
         state or state changes that it does not know or care about.
         """
-        #Nothing to do for network update operations. Leaving this as a
-        #placeholder for later use
-        pass
+        network = context.current
+        original_network = context.original
+        self.qos.update_network(network, original_network)
 
     def delete_network_precommit(self, context):
         """Delete resources for a network.
@@ -349,8 +354,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 'subnet_id': subnet_id,
                 'cidr': cidr,
                 })
-        virtualNetwork = sdn2_client.VirtualNetworks.get(resource_id=network_id)
-        subnet = sdn2_client.SubNetwork(resource_id=subnet_id, address_prefix=cidr)
+        virtualNetwork = client.VirtualNetworks.get(resource_id=network_id)
+        subnet = client.SubNetwork(resource_id=subnet_id, address_prefix=cidr)
         dummy_prefix = self._dummy_address_space.address_prefixes[0]
         if cidr not in virtualNetwork.address_space["addressPrefixes"]:
             virtualNetwork.address_space["addressPrefixes"].append(cidr)
@@ -536,7 +541,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         try:
-            sdn2_client.NetworkInterfaces.remove(resource_id=port["id"], wait=True)
+            client.NetworkInterfaces.remove(resource_id=port["id"], wait=True)
         except hnv_exception.NotFound:
             pass
         return
@@ -587,12 +592,19 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         subnet = self._plugin.get_subnet(admin_context, subnet_id)
         return subnet
 
+    def _get_port_settins(self, port):
+        qos_settings = self.qos.get_qos_options(port)
+        port_settings = client.PortSettings(
+            qos_settings=qos_settings)
+        return port_settings
+
     def _bind_port_on_network_controller(self, port, network):
         port_id = port["id"]
         mac_address = port["mac_address"].replace(":", "").replace("-", "").upper()
         network_id = network['id']
         cached_subnets = {}
         acl = self._get_port_acl(port)
+        port_settings = self._get_port_settins(port)
         ipConfigurations = []
         dns_servers = set()
         # TODO(gsamfira): validate IP version
@@ -608,8 +620,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 raise ValueError("fixed_ip %s is not part of subnet %s" % (
                     ip["ip_address"], subnet_obj.address_prefix))
             resource_id = self._get_ip_resource_id(ip, port_id)
-            subnet_resource = sdn2_client.Resource(resource_ref=subnet_obj.resource_ref)
-            ipConfiguration = sdn2_client.IPConfiguration(
+            subnet_resource = client.Resource(resource_ref=subnet_obj.resource_ref)
+            ipConfiguration = client.IPConfiguration(
                     resource_id=resource_id,
                     private_ip_address=ip["ip_address"],
                     private_ip_allocation_method=constants.HNV_METHOD_STATIC,
@@ -620,12 +632,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if len(ipConfigurations) == 0:
             raise ValueError("Could not build valid IP address configurations")
 
-        networkInterface = sdn2_client.NetworkInterfaces(
+        networkInterface = client.NetworkInterfaces(
                 resource_id=port_id,
                 instance_id=port_id,
                 dns_settings={"DnsServers": list(dns_servers)},
                 ip_configurations=ipConfigurations,
                 mac_address=mac_address,
+                port_settings=port_settings,
                 mac_allocation_method=constants.HNV_METHOD_STATIC)
         LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)s" % {
             'port_id': port_id,
