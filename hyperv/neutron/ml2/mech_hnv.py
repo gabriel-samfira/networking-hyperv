@@ -34,7 +34,7 @@ from hyperv.common.i18n import _, _LE, _LI  # noqa
 from hnv_client import client
 from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
-from hyperv.ml2 import qos
+from hyperv.neutron.ml2 import qos
 
 
 from hnv_client import config as hnv_config
