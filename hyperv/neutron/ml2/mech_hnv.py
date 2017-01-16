@@ -111,7 +111,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._dummy_address_space = client.AddressSpace(address_prefixes=["1.0.0.0/32"])
         self.agent_type = constants.AGENT_TYPE_HNV
         self._setup_vif_port_bindings()
-        self.qos = hnv_qos.HNVQosDriver(self)
+        self.qos = qos.HNVQosDriver(self)
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
