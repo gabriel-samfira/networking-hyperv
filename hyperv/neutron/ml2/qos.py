@@ -17,7 +17,7 @@ from hnv_client import client
 from neutron_lib import constants
 
 from neutron import context as n_context
-from neutron import manager
+from neutron_lib.plugins import directory
 from neutron.objects.qos import policy as qos_policy
 from neutron.objects.qos import rule as qos_rule
 from neutron.plugins.ml2 import plugin as ml2_plugin
@@ -41,7 +41,7 @@ class HNVQosNotificationDriver(qos_base.QosServiceNotificationDriverBase):
     @property
     def _driver(self):
         if self._driver_property is None:
-            plugin = manager.NeutronManager.get_plugin()
+            plugin = directory.get_plugin()
             if isinstance(plugin, ml2_plugin.Ml2Plugin):
                 self._driver_property = \
                     plugin.mechanism_manager.mech_drivers['hnv'].obj
@@ -72,7 +72,7 @@ class HNVQosDriver(object):
     @property
     def _plugin(self):
         if self._plugin_property is None:
-            self._plugin_property = manager.NeutronManager.get_plugin()
+            self._plugin_property = directory.get_plugin()
         return self._plugin_property
 
     def _is_network_device_port(self, port):
