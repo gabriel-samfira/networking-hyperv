@@ -598,50 +598,57 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             qos_settings=qos_settings)
         return port_settings
 
-    def _bind_port_on_network_controller(self, port, network):
+    def _get_nc_ip_configuration(self, ip, network_id, port, cached_subnets):
         port_id = port["id"]
-        mac_address = port["mac_address"].replace(":", "").replace("-", "").upper()
-        network_id = network['id']
-        cached_subnets = {}
         acl = self._get_port_acl(port)
-        port_settings = self._get_port_settins(port)
-        ipConfigurations = []
-        dns_servers = set()
-        # TODO(gsamfira): validate IP version
-        for ip in port.get("fixed_ips", []):
-            subnet_id = ip.get("subnet_id")
-            neutron_subnet = self._get_subnet_from_neutron(subnet_id)
-            if neutron_subnet.get("dns_nameservers"):
-                for i in neutron_subnet["dns_nameservers"]:
-                    dns_servers.add(i)
-            cached_subnets, subnet_obj = self._get_subnet_from_cache(subnet_id, network_id, cached_subnets)
-            if self._confirm_ip_in_subnet(ip["ip_address"], subnet_obj.address_prefix) is False:
-                # TODO(gsamfira): replace ValueError with module specific exception
-                raise ValueError("fixed_ip %s is not part of subnet %s" % (
-                    ip["ip_address"], subnet_obj.address_prefix))
-            resource_id = self._get_ip_resource_id(ip, port_id)
-            subnet_resource = client.Resource(resource_ref=subnet_obj.resource_ref)
-            ipConfiguration = client.IPConfiguration(
+        subnet_id = ip.get("subnet_id")
+        neutron_subnet = self._get_subnet_from_neutron(subnet_id)
+        dns_nameservers = neutron_subnet.get("dns_nameservers", [])
+        cached_subnets, subnet_obj = self._get_subnet_from_cache(
+            subnet_id, network_id, cached_subnets)
+        if not self._confirm_ip_in_subnet(ip["ip_address"], subnet_obj.address_prefix):
+            # TODO(gsamfira): replace ValueError with module specific exception
+            raise ValueError("fixed_ip %s is not part of subnet %s" % (
+                ip["ip_address"], subnet_obj.address_prefix))
+        resource_id = self._get_ip_resource_id(ip, port_id)
+        subnet_resource = client.Resource(resource_ref=subnet_obj.resource_ref)
+        ipConfiguration = client.IPConfiguration(
                     resource_id=resource_id,
                     private_ip_address=ip["ip_address"],
                     private_ip_allocation_method=constants.HNV_METHOD_STATIC,
                     subnet=subnet_resource,
                     access_controll_list=acl)
-            ipConfigurations.append(ipConfiguration.dump())
+        return (ipConfiguration, dns_nameservers, cached_subnets)
 
+    def get_port_details(self, port, network_id):
+        mac_address = port["mac_address"].replace(":", "").replace("-", "").upper()
+        port_settings = self._get_port_settins(port)
+        cached_subnets = {}
+        ipConfigurations = []
+        dns_nameservers = set()
+        for ip in port.get("fixed_ips", []):
+            ipConfig, nameservers, cached_subnets = self._get_nc_ip_configuration(
+                ip, network_id,
+                port, cached_subnets)
+            ipConfigurations.append(ipConfig.dump())
+            dns_nameservers.update(nameservers)
         if len(ipConfigurations) == 0:
             raise ValueError("Could not build valid IP address configurations")
+        return {
+            "resource_id": port["id"],
+            "dns_settings": {"DnsServers": list(dns_nameservers)},
+            "ip_configurations": ipConfigurations,
+            "mac_address": mac_address,
+            "port_settings": port_settings,
+            "mac_allocation_method": constants.HNV_METHOD_STATIC,
+        }
 
-        networkInterface = client.NetworkInterfaces(
-                resource_id=port_id,
-                instance_id=port_id,
-                dns_settings={"DnsServers": list(dns_servers)},
-                ip_configurations=ipConfigurations,
-                mac_address=mac_address,
-                port_settings=port_settings,
-                mac_allocation_method=constants.HNV_METHOD_STATIC)
+    def _bind_port_on_network_controller(self, port, network):
+        network_id = network['id']
+        port_options = self.get_port_details(port, network_id)
+        networkInterface = client.NetworkInterfaces(**port_options)
         LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)s" % {
-            'port_id': port_id,
+            'port_id': port["id"],
             'payload': json.dumps(networkInterface.dump()),
             })
         networkInterface = networkInterface.commit(wait=True)
