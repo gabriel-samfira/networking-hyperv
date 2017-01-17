@@ -84,7 +84,7 @@ class HNVQosDriver(object):
 
     def _generate_port_options(self, context, policy_id):
         if policy_id is None:
-            return {}
+            return client.QosSettings()
         options = {}
         # The policy might not have any rules
         all_rules = qos_rule.get_rules(context, policy_id)
@@ -99,10 +99,10 @@ class HNVQosDriver(object):
     def get_qos_options(self, port):
         # Is qos service enabled
         if 'qos_policy_id' not in port:
-            return {}
+            return client.QosSettings()
         # Don't apply qos rules to network devices
         if self._is_network_device_port(port):
-            return {}
+            return client.QosSettings()
 
         # Determine if port or network policy should be used
         context = n_context.get_admin_context()
@@ -136,9 +136,6 @@ class HNVQosDriver(object):
             self._driver.update_port(port, network_id)
 
     def update_network(self, network, original_network):
-        # Is qos service enabled
-        if 'qos_policy_id' not in network:
-            return
         # Was network qos policy changed
         network_policy_id = network.get('qos_policy_id')
         old_network_policy_id = original_network.get('qos_policy_id')

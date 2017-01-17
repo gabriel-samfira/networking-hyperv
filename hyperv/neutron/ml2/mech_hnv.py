@@ -525,7 +525,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         state. It is up to the mechanism driver to ignore state or
         state changes that it does not know or care about.
         """
-        pass
+        port = context.current
+        network = context.network
+        self.update_port(port, network["id"])
 
     def delete_port_postcommit(self, context):
         """Delete a port.
