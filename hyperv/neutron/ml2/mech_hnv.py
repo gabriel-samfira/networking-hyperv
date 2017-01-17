@@ -595,9 +595,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             create = True
         if create:
             return self._bind_port_on_network_controller(port, network_id)
-
         port_details = self.get_port_details(port, network_id)
-        nc_port = nc_port.update(port_details).commit(wait=True)
+        nc_port.update(port_details)
+        nc_port.commit(wait=True)
         return nc_port.instance_id
 
     # TODO(gsamfira): IMPLEMENT_ME
