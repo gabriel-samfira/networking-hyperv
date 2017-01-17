@@ -583,6 +583,23 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             raise err
         return (cache, subnet_obj)
 
+    def update_port(self, port, network_id):
+        create = False
+        try:
+            nc_port = client.NetworkInterfaces.get(resource_id=port["id"])
+        except hnv_exception.NotFound:
+            LOG.warning("Port %(port)s was not found in network controller. "
+                "Creating new port object" % {
+                'port': port["id"]
+                })
+            create = True
+        if create:
+            return self._bind_port_on_network_controller(port, network_id)
+
+        port_details = self.get_port_details(port, network_id)
+        nc_port = nc_port.update(port_details).commit(wait=True)
+        return nc_port.instance_id
+
     # TODO(gsamfira): IMPLEMENT_ME
     def _confirm_ip_in_subnet(self, ip, subnet):
         return True
@@ -643,8 +660,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             "mac_allocation_method": constants.HNV_METHOD_STATIC,
         }
 
-    def _bind_port_on_network_controller(self, port, network):
-        network_id = network['id']
+    def _bind_port_on_network_controller(self, port, network_id):
         port_options = self.get_port_details(port, network_id)
         networkInterface = client.NetworkInterfaces(**port_options)
         LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)s" % {

@@ -92,6 +92,7 @@ class HNVQosDriver(object):
             if isinstance(rule, qos_rule.QosBandwidthLimitRule):
                 if rule.max_kbps:
                     options['outbound_maximum_mbps'] = str(rule.max_kbps/1024)
+                    options['inbound_maximum_mbps'] = str(rule.max_kbps/1024)
         qos_settings = client.QosSettings(**options)
         return qos_settings
 
@@ -116,7 +117,7 @@ class HNVQosDriver(object):
         policy_id = port_policy_id or network_policy_id
         return self._generate_port_options(context, policy_id)
 
-    def _update_network_ports(self, context, network_id, options):
+    def _update_network_ports(self, context, network_id):
         # Retrieve all ports for this network
         ports = self._plugin.get_ports(context,
                                        filters={'network_id': [network_id]})
@@ -132,7 +133,7 @@ class HNVQosDriver(object):
             if self._is_network_device_port(port):
                 continue
             # Call into mech driver to update port
-            self._driver.update_port(port, port, options)
+            self._driver.update_port(port, network_id)
 
     def update_network(self, network, original_network):
         # Is qos service enabled
@@ -146,8 +147,7 @@ class HNVQosDriver(object):
 
         # Update the qos options on each network port
         context = n_context.get_admin_context()
-        options = self._generate_port_options(context, network_policy_id)
-        self._update_network_ports(context, network.get('id'), options)
+        self._update_network_ports(context, network.get('id'))
 
     def update_policy(self, context, policy):
         options = self._generate_port_options(context, policy.id)
@@ -155,10 +155,10 @@ class HNVQosDriver(object):
         # Update each network bound to this policy
         network_bindings = policy.get_bound_networks()
         for network_id in network_bindings:
-            self._update_network_ports(context, network_id, options)
+            self._update_network_ports(context, network_id)
 
         # Update each port bound to this policy
         port_bindings = policy.get_bound_ports()
         for port_id in port_bindings:
             port = self._plugin.get_port(context, port_id)
-            self._driver.update_port(port, port, options)
+            self._driver.update_port(port, port)
