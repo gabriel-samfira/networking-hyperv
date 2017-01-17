@@ -93,6 +93,8 @@ class HNVQosDriver(object):
                 if rule.max_kbps:
                     options['outbound_maximum_mbps'] = str(rule.max_kbps/1024)
                     options['inbound_maximum_mbps'] = str(rule.max_kbps/1024)
+        if len(options) == 0:
+            return None
         qos_settings = client.QosSettings(**options)
         return qos_settings
 
