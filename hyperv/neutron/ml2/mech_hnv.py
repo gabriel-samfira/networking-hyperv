@@ -482,11 +482,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def create_port_precommit(self, context):
         self._insert_provisioning_block(context)
 
-    def update_port_precommit(self, context):
-        if context.host == context.original_host:
-            return
-        self._insert_provisioning_block(context)
-
     def create_port_postcommit(self, context):
         """Create a port.
 
@@ -506,8 +501,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     }
                 )
         instance_id = self._bind_port_on_network_controller(port, network.current)
-        self.vif_details[constants.HNV_PORT_PROFILE_ID] = instance_id
-        port[portbindings.VIF_DETAILS].update(self.vif_details)
+        port[portbindings.VIF_DETAILS].update(
+            {constants.HNV_PORT_PROFILE_ID: instance_id})
+
+    def update_port_precommit(self, context):
+        if context.host == context.original_host:
+            return
+        self._insert_provisioning_block(context)
 
     def update_port_postcommit(self, context):
         """Update a port.
@@ -527,7 +527,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         network = context.network
-        self.update_port(port, network["id"])
+        self.update_port(port, network.current["id"])
 
     def delete_port_postcommit(self, context):
         """Delete a port.
@@ -577,7 +577,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         try:
            subnet_obj = self._vs_client.get(resource_id=subnet_id, parent_id=network_id)
            cache[subnet_cache_key] = subnet_obj 
-        except hnv_exception.NotFound as err:
+        except hnv_exception.NotFound:
             LOG.error("Failed to find subnet with ID %(subnet_id)s on network "
                     "%(network_id)s", 
                     {'subnet_id': subnet_id,
@@ -596,7 +596,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 })
             create = True
         if create:
-            return self._bind_port_on_network_controller(port, network_id)
+            #TODO(gsamfira): Notify neutron L2 agent of the new instance ID
+            #for this port, as that needs to be set on the VM switch port
+            #for the network controller to be able to control it
+            instance_id = self._bind_port_on_network_controller(port, network_id)
+            port[portbindings.VIF_DETAILS].update(
+                {constants.HNV_PORT_PROFILE_ID: instance_id})
+            return instance_id
         port_details = self.get_port_details(port, network_id)
         nc_port.update(port_details)
         nc_port.commit(wait=True)

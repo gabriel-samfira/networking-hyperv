@@ -84,7 +84,7 @@ class HNVQosDriver(object):
 
     def _generate_port_options(self, context, policy_id):
         if policy_id is None:
-            return client.QosSettings()
+            return None
         options = {}
         # The policy might not have any rules
         all_rules = qos_rule.get_rules(context, policy_id)
@@ -99,10 +99,10 @@ class HNVQosDriver(object):
     def get_qos_options(self, port):
         # Is qos service enabled
         if 'qos_policy_id' not in port:
-            return client.QosSettings()
+            return None
         # Don't apply qos rules to network devices
         if self._is_network_device_port(port):
-            return client.QosSettings()
+            return None
 
         # Determine if port or network policy should be used
         context = n_context.get_admin_context()
@@ -121,10 +121,7 @@ class HNVQosDriver(object):
         # Retrieve all ports for this network
         ports = self._plugin.get_ports(context,
                                        filters={'network_id': [network_id]})
-        nc_ports = self._driver._get_nc_ports()
         for port in ports:
-            if nc_ports.get(port["id"]) is None:
-                continue
             # Don't apply qos rules if port has a policy
             port_policy_id = port.get('qos_policy_id')
             if port_policy_id:
@@ -135,13 +132,15 @@ class HNVQosDriver(object):
             # Call into mech driver to update port
             self._driver.update_port(port, network_id)
 
-    def update_network(self, network, original_network):
-        # Was network qos policy changed
-        network_policy_id = network.get('qos_policy_id')
-        old_network_policy_id = original_network.get('qos_policy_id')
-        if network_policy_id == old_network_policy_id:
-            return
-
+    def update_network(self, network, old_network):
+        policy_id = network.get("qos_policy_id")
+        old_policy_id = old_network.get("qos_policy_id")
+        #TODO(gsamfira): When removing a policy, both current and
+        # original networks hold the same value.
+        LOG.debug("Changing policies from %(old_policy_id)s "
+            "to %(policy_id)s" % {
+            'old_policy_id': old_policy_id,
+            'policy_id': policy_id})
         # Update the qos options on each network port
         context = n_context.get_admin_context()
         self._update_network_ports(context, network.get('id'))
