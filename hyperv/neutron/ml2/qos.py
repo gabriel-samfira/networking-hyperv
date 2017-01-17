@@ -53,7 +53,7 @@ class HNVQosNotificationDriver(qos_base.QosServiceNotificationDriverBase):
 
     def update_policy(self, context, policy):
         # Call into qos_driver to update the policy
-        self._driver.qos_driver.update_policy(context, policy)
+        self._driver.qos.update_policy(context, policy)
 
     def delete_policy(self, context, policy):
         # No need to update HNV on delete
