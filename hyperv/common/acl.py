@@ -13,10 +13,11 @@
 #
 
 from oslo_config import cfg
-
 from neutron import context as n_context
-
+from neutron.callbacks import events
 from hnv_client import client
+
+from hyperv.neutron import exception as hyperv_exc
 
 CONF = cfg.CONF
 
@@ -32,12 +33,99 @@ ACL_PROP_MAP = {
     'address_default': {'IPv4': '0.0.0.0/0', 'IPv6': '::/0'}
 }
 
-class AclRuleConverter(object):
+class HNVAclDriver(object):
 
-	def __init__(self, neutron_rules, nc_rules=None):
-		self._neutron_rules = neutron_rules
-		self._nc_rules = nc_rules
-		self._security_groups = {}
+	CREATE_ACTION = "create"
+	DELETE_ACTION = "delete"
+	UPDATE_ACTION = "update"
+
+	def __init__(self, plugin, driver):
+		self._plugin = plugin
+		self._driver = driver
+		self.admin_context = n_context.get_admin_context()
+		# self._neutron_rules = neutron_rules
+		# self._nc_rules = nc_rules
+		# self._security_groups = {}
+
+	def _remove_acl(self, acl_id):
+		pass
+
+	def _remove_acls(self, acl_list):
+		if type(acl_list) is not list:
+			acl_list = [acl_list,]
+		for i in acl_list:
+			self._remove_acl(i)
+
+	def _create_sgs_and_rules(self, sgs):
+		pass
+
+	def _sync_existing_sgs(self, sgs):
+		pass
+
+	def sync_acls(self, ctx):
+		nc_acls = client.AccessControlLists.get()
+		nc_acl_list = {}
+		db_security_groups_list = {}
+		for i in nc_acls:
+			if nc_acl_list.get(i.resource_id) is None:
+				nc_acl_list[i.resource_id] = i
+
+		db_security_groups = self._plugin.get_security_groups(
+			self.admin_context)
+		for i in db_security_groups:
+			if db_security_groups_list.get(i["id"]) is None:
+				db_security_groups_list[i["id"]] = i["rules"]
+		nc_rule_set = set(nc_acl_list.keys())
+		db_rule_set = set(db_security_groups_list.keys())
+
+		must_remove = list(nc_rule_set - db_rule_set)
+		must_add = list(db_rule_set - nc_rule_set)
+		must_sync = list(db_rule_set & nc_rule_set)
+		new_secgroups = {k: db_security_groups_list[k] for k in must_add}
+		must_sync_rules = {k: db_security_groups_list[k] for k in must_sync}
+		self._remove_acls(must_remove)
+		self._create_sgs_and_rules(new_secgroups)
+		self._sync_existing_sgs(must_sync_rules)
+
+	def process_sg_notification(self, resource, event, trigger, **kwargs):
+		sg = kwargs.get('security_group')
+		if event == events.AFTER_CREATE:
+			acl = client.AccessControlLists(
+				resource_id=sg['id'],
+				inbound_action="Deny",
+				outbound_action="Deny").commit(wait=True)
+		elif event == events.BEFORE_DELETE:
+			try:
+				acl = client.AccessControlLists.get(
+					resource_id=sg['id'])
+			except hyperv_exc.NotFound:
+				return
+			acl.remove(resource_id=acl.resource_id, wait=True)
+		return
+
+	def process_sg_rule_notification(self, resource, event, trigger, **kwargs):
+		options = {}
+		if event == events.AFTER_CREATE:
+			options["sg_rule"] = kwargs.get('security_group_rule')
+	        options["sg_id"] = options["sg_rule"]['security_group_id']
+	        return self._create_acl_rule(**options)
+	    elif event == events.BEFORE_DELETE:
+	    	options["sg_rule"] = self._plugin.get_security_group_rule(
+                self.admin_context, kwargs.get('security_group_rule_id'))
+            options["sg_id"] = options["sg_rule"]['security_group_id']
+	        return self._delete_acl_rule(**options)
+
+	def _create_acl_rule(self, sg_rule, sg_id):
+		acl = self._get_acl_rule(sg_rule, 100)
+		return acl.commit(wait=True)
+
+	def _delete_acl_rule(self, sg_rule, sg_id):
+		try:
+			acl = client.ACLRules.get(
+				parent_id=sg_id, resource_id=sg_rule["id"])
+		except hyperv_exc.NotFound:
+			return
+		acl.remove(resource_id=acl.resource_id, wait=True)
 
 	def _get_sg_members(self, grpid):
 		pass
@@ -51,16 +139,17 @@ class AclRuleConverter(object):
 
 	def _sanitize_port(self, rule):
 		port = None
-		port_range_max = rule["port_range_max"]
-		port_range_min = rule["port_range_min"]
+		port_range_max = rule.get("port_range_max")
+		port_range_min = rule.get("port_range_min")
+		if port_range_max is None or port_range_min is None:
+			return "*"
 		if port_range_min == port_range_max:
 			port = port_range_max
 		else:
 			port = "%s-%s" % (
 				int(port_range_min),
 				int(port_range_max))
-		return (port if port else "*")
-
+		return port
 
 	def _get_acl_rule(self, rule, priority):
 		direction = ACL_PROP_MAP["direction"][rule["direction"]]
@@ -77,9 +166,11 @@ class AclRuleConverter(object):
 			source_prefix = rule["remote_ip_prefix"]
 			destination_port_range = ACL_PROP_MAP["default"]
 			source_port_range = self._sanitize_port(rule)
-		#security_group_id = rule["security_group_id"]
+
+		security_group_id = rule["security_group_id"]
 		rule_id = rule["id"]
 		rule = client.ACLRules(
+			parent_id=security_group_id,
 			resource_id=rule_id,
 			protocol=protocol,
 			rule_type=direction,

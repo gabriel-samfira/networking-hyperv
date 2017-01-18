@@ -19,6 +19,10 @@ from requests.status_codes import codes
 from oslo_config import cfg
 from oslo_log import log
 
+from neutron.callbacks import events
+from neutron.callbacks import registry
+from neutron.callbacks import resources
+
 from neutron_lib import exceptions as n_exc
 from neutron_lib import constants as const
 from neutron_lib.plugins import directory
@@ -35,6 +39,7 @@ from hnv_client import client
 from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
 from hyperv.neutron.ml2 import qos
+from hyperv.neutron.ml2 import hnv_acl
 
 
 from hnv_client import config as hnv_config
@@ -112,6 +117,27 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self.agent_type = constants.AGENT_TYPE_HNV
         self._setup_vif_port_bindings()
         self.qos = qos.HNVQosDriver(self)
+        self.acl = hnv_acl.HNVAclDriver(self._plugin, self)
+        self.subscribe(self.acl)
+        self._cached_ports_instance_ids = {}
+
+    def subscribe(self, acl_driver):
+        if cfg.CONF.SECURITYGROUP.enable_security_group:
+            registry.subscribe(acl_driver.process_sg_notification,
+                               resources.SECURITY_GROUP,
+                               events.AFTER_CREATE)
+            registry.subscribe(acl_driver.process_sg_notification,
+                               resources.SECURITY_GROUP,
+                               events.AFTER_UPDATE)
+            registry.subscribe(acl_driver.process_sg_notification,
+                               resources.SECURITY_GROUP,
+                               events.BEFORE_DELETE)
+            registry.subscribe(acl_driver.process_sg_rule_notification,
+                               resources.SECURITY_GROUP_RULE,
+                               events.AFTER_CREATE)
+            registry.subscribe(acl_driver.process_sg_rule_notification,
+                               resources.SECURITY_GROUP_RULE,
+                               events.BEFORE_DELETE)
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
@@ -208,7 +234,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 description="Allow all egress traffic",
                 priority="103", rule_type="Outbound")
         default_acl = client.AccessControlLists(
-                acl_rules=[allow_egress.dump(),],
+                acl_rules=[allow_egress,],
                 resource_id=constants.HNV_DEFAULT_NETWORK,
                 inbound_action="Deny",
                 outbound_action="Allow")
@@ -362,9 +388,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if dummy_prefix in virtualNetwork.address_space["addressPrefixes"]:
             virtualNetwork.address_space["addressPrefixes"].remove(dummy_prefix)
         if virtualNetwork.subnetworks is None:
-            virtualNetwork.subnetworks = [subnet.dump(),]
+            virtualNetwork.subnetworks = [subnet,]
         else:
-            virtualNetwork.subnetworks.append(subnet.dump())
+            virtualNetwork.subnetworks.append(subnet)
         virtualNetwork.commit(wait=True)
         return
 
@@ -500,9 +526,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     'network': network.current["id"],
                     }
                 )
-        instance_id = self._bind_port_on_network_controller(port, network.current)
-        port[portbindings.VIF_DETAILS].update(
-            {constants.HNV_PORT_PROFILE_ID: instance_id})
+        instance_id = self._bind_port_on_network_controller(port, network.current["id"])
+        self._cached_ports_instance_ids[port["id"]] = instance_id
+
 
     def update_port_precommit(self, context):
         if context.host == context.original_host:
@@ -655,7 +681,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             ipConfig, nameservers, cached_subnets = self._get_nc_ip_configuration(
                 ip, network_id,
                 port, cached_subnets)
-            ipConfigurations.append(ipConfig.dump())
+            ipConfigurations.append(ipConfig)
             dns_nameservers.update(nameservers)
         if len(ipConfigurations) == 0:
             raise ValueError("Could not build valid IP address configurations")
@@ -673,7 +699,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         networkInterface = client.NetworkInterfaces(**port_options)
         LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)s" % {
             'port_id': port["id"],
-            'payload': json.dumps(networkInterface.dump()),
+            'payload': json.dumps(networkInterface),
             })
         networkInterface = networkInterface.commit(wait=True)
         return networkInterface.instance_id
@@ -716,12 +742,16 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                             'ln': self._logicalNetworkID})
                 continue
             if agent['alive']:
+                instance_id = self._cached_ports_instance_ids.get(port["id"])
+                port[portbindings.VIF_DETAILS].update(
+                    {constants.HNV_PORT_PROFILE_ID: instance_id})
                 for segment in context.segments_to_bind:
-                    context.set_binding(segment[driver_api.ID],
-                            self.vif_type,
-                            self.vif_details)
-                    LOG.debug("Bound using segment: %s", segment)
-                    return
+                    if self._check_supported_network_type(segment["network_type"])
+                        context.set_binding(segment[driver_api.ID],
+                                self.vif_type,
+                                {constants.HNV_PORT_PROFILE_ID: instance_id})
+                        LOG.debug("Bound using segment: %s", segment)
+                        return
             else:
                 LOG.warning(_LW("Refusing to bind port %(pid)s to dead agent: "
                                 "%(agent)s"),
