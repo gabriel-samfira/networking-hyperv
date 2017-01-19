@@ -36,6 +36,7 @@ from neutron import context as n_context
 
 from hyperv.common.i18n import _, _LE, _LI  # noqa
 from hnv_client import client
+from hyperv.common.utils import retry_on_http_error
 from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
 from hyperv.neutron.ml2 import qos
@@ -47,26 +48,6 @@ from hnv_client.common import exception as hnv_exception
 
 LOG = log.getLogger(__name__)
 CONF = cfg.CONF
-
-def retry_on_http_error(code, tries=5):
-    def deco_retry(f):
-        def f_retry(*args, **kwargs):
-            mtries = tries
-            if mtries <= 1:
-                return f(*args, **kwargs)
-            while mtries-1 > 0:
-                try:
-                    return f(*args, **kwargs)
-                except requests.exceptions.HTTPError as err:
-                    if err.response.status_code == code:
-                        LOG.debug("Resource changed while we were updating")
-                        mtries -= 1
-                    else:
-                        raise err
-            return f(*args, **kwargs)
-        return f_retry
-    return deco_retry
-
 
 class HNVMechanismDriver(driver_api.MechanismDriver):
     """Hyper-V Network Virtualization driver.
