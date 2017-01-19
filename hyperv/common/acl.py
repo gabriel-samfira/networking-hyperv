@@ -12,7 +12,9 @@
 #    under the License.
 #
 
-from oslo_config import cfg
+import netaddr
+
+# from oslo_config import cfg
 from neutron import context as n_context
 from neutron.callbacks import events
 from hnv_client import client
@@ -21,7 +23,7 @@ from hyperv.common.utils import retry_on_http_error
 
 from hyperv.neutron import exception as hyperv_exc
 
-CONF = cfg.CONF
+# CONF = cfg.CONF
 
 ACL_PROP_MAP = {
     'direction': {'ingress': "Inbound",
@@ -44,6 +46,7 @@ class HNVAclDriver(object):
 		self._plugin = plugin
 		self._driver = driver
 		self.admin_context = n_context.get_admin_context()
+		self._nc_ports = {}
 		# self._neutron_rules = neutron_rules
 		# self._nc_rules = nc_rules
 		# self._security_groups = {}
@@ -85,7 +88,7 @@ class HNVAclDriver(object):
 			rules = self._process_rules(db_sgs[sg])
 			self._apply_nc_acl_rules(nc_acls[sg], rules)
 
-	def sync_acls(self, ctx):
+	def sync_acls(self):
 		nc_acls = client.AccessControlLists.get()
 		nc_acl_list = {}
 		db_sg_list = {}
@@ -163,8 +166,38 @@ class HNVAclDriver(object):
 		client.ACLRules.remove(
 			resource_id=sg_rule["id"], parent_id=sg_id, wait=True)
 
-	def _get_sg_members(self, sg_id):
-		return []
+	def _get_ip_configs(self):
+		ip_configs = {}
+		ports = client.NetworkInterfaces.get()
+		for port in ports:
+			for ip in port.ip_configurations:
+				ref = ip.get("resourceRef")
+				ip_configs[ref] = ip
+		return ip_configs
+
+	def _get_ip_from_cache(self, ref, ip_config_cache):
+		ip = ip_config_cache.get(ref, False)
+		if not ip:
+			# refresh cache
+			ip_config_cache = self._get_ip_configs()
+		return (ip_config_cache.get(ref), ip_config_cache)
+
+	def _get_sg_members(self, sg_id, ip_config_cache):
+		ips = []
+		try:
+			sg = client.AccessControlLists.get(resource_id=sg_id)
+		except hyperv_exc.NotFound:
+			return ips
+
+		if sg.ip_configuration:
+			for i in sg.ip_configuration:
+				ref = i.get("resourceRef")
+				ip_config, ip_config_cache = self._get_ip_from_cache(
+					ref, ip_config_cache)
+				if not ip_config:
+					continue
+				ips.append(ip_config.private_ip_address)
+		return ips
 
 	def _sanitize_protocol(self, protocol):
 		if protocol in ("icmp", "ipv6-icmp", "icmpv6"):
@@ -191,6 +224,8 @@ class HNVAclDriver(object):
 		direction = ACL_PROP_MAP["direction"][rule["direction"]]
 		protocol = self._sanitize_protocol(rule["protocol"])
 		if protocol is None:
+			LOG.debug("Protocol %(protocol)s is not supported" % {
+				'protocol': rule["protocol"]})
 			return None
 		description = rule["description"]
 
@@ -224,10 +259,11 @@ class HNVAclDriver(object):
 	def _get_member_rules(self, rule, members):
 		rules = []
 		for i in members:
+			version = netaddr.IPAddress(i).version
 			tmp_rule = rule.copy()
-			del tmp_rule["remote_group_id"]
 			tmp_rule["id"] = "%s_%s" % (tmp_rule["id"], i)
-			rule = self._get_acl_rule(tmp_rule)
+			tmp_rule["remote_ip_prefix"] = "%s/%s" % (i, i.netmask_bits())
+ 			rule = self._get_acl_rule(tmp_rule)
 			if rule is None:
 				continue
 			rules.append(rule)
@@ -243,7 +279,8 @@ class HNVAclDriver(object):
 				sec_groups[sg_id] = []
 			remote_group = i.get("remote_group_id", None)
 			if remote_group:
-				member_ips = self._get_sg_members(remote_group)
+				member_ips, self._nc_ports = self._get_sg_members(
+					remote_group, self._nc_ports)
 			if len(member_ips):
 				tmp_rules = self._get_member_rules(i, member_ips)
 			else:
@@ -253,22 +290,4 @@ class HNVAclDriver(object):
 			for j in tmp_rules:
 				sec_groups[sg_id].append(j)
 		return sec_groups
-
-
-class Acl(object):
-
-	# Tenant ACL rule priority starts at 100
-	_SG_PRIORITY_START=100
-
-	def __init__(self, plugin, port_details=None):
-		self._port = port_details
-		self._acl_client = client.AccessControlLists()
-		self._plugin = plugin
-		self._admin_context = n_context.get_admin_context()
-
-	def fetch_security_group_from_neutron(self, sec_group_id):
-		return self._plugin.get_security_group(self._admin_context, sec_group_id)
-
-	def fetch_security_groups(self):
-		pass
 

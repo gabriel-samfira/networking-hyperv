@@ -99,6 +99,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._setup_vif_port_bindings()
         self.qos = qos.HNVQosDriver(self)
         self.acl = hnv_acl.HNVAclDriver(self._plugin, self)
+        self.acl.sync_acls()
         self.subscribe(self.acl)
         self._cached_ports_instance_ids = {}
 
@@ -107,9 +108,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             registry.subscribe(acl_driver.process_sg_notification,
                                resources.SECURITY_GROUP,
                                events.AFTER_CREATE)
-            registry.subscribe(acl_driver.process_sg_notification,
-                               resources.SECURITY_GROUP,
-                               events.AFTER_UPDATE)
             registry.subscribe(acl_driver.process_sg_notification,
                                resources.SECURITY_GROUP,
                                events.BEFORE_DELETE)
