@@ -42,8 +42,8 @@ _PROVIDER_NAME = "openstack"
 
 class HNVAclDriver(object):
 
-    def __init__(self, plugin, driver):
-        self._plugin = plugin
+    def __init__(self, driver):
+        self._plugin = driver._plugin
         self._driver = driver
         self.admin_context = n_context.get_admin_context()
         self._nc_ports = {}
@@ -122,7 +122,7 @@ class HNVAclDriver(object):
         # add new acls
         self._create_acls_and_rules(new_secgroups)
 
-    def process_sg_notification(self, resource, event, trigger, **kwargs):
+    def process_sg_notification(self, event, **kwargs):
         sg = kwargs.get('security_group')
         if event == events.AFTER_CREATE:
             acl = client.AccessControlLists(
@@ -139,7 +139,7 @@ class HNVAclDriver(object):
             acl.remove(resource_id=acl.resource_id, wait=True)
         return
 
-    def process_sg_rule_notification(self, resource, event, trigger, **kwargs):
+    def process_sg_rule_notification(self, event, **kwargs):
         options = {}
         if event == events.AFTER_CREATE:
             options["sg_rule"] = kwargs.get('security_group_rule')

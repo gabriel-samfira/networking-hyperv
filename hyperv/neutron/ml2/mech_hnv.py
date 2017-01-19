@@ -97,30 +97,42 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self.agent_type = constants.AGENT_TYPE_HNV
         self._setup_vif_port_bindings()
         self.qos = qos.HNVQosDriver(self)
-        self.acl = hnv_acl.HNVAclDriver(self._plugin, self)
-        self.subscribe(self.acl)
+        self._acl_driver_property = None
+        self.subscribe()
         self._cached_ports_instance_ids = {}
 
-    def subscribe(self, acl_driver):
+    @property
+    def _acl_driver(self):
+        if self._acl_driver_property is None:
+            self._acl_driver_property = hnv_acl.HNVAclDriver(self)
+        return self._acl_driver_property
+
+    def subscribe(self):
         registry.subscribe(self.post_fork_initialize,
                            resources.PROCESS,
                            events.AFTER_INIT)
         if cfg.CONF.SECURITYGROUP.enable_security_group:
-            registry.subscribe(acl_driver.process_sg_notification,
+            registry.subscribe(self.process_sg_notification,
                                resources.SECURITY_GROUP,
                                events.AFTER_CREATE)
-            registry.subscribe(acl_driver.process_sg_notification,
+            registry.subscribe(self.process_sg_notification,
                                resources.SECURITY_GROUP,
                                events.BEFORE_DELETE)
-            registry.subscribe(acl_driver.process_sg_rule_notification,
+            registry.subscribe(self.process_sg_rule_notification,
                                resources.SECURITY_GROUP_RULE,
                                events.AFTER_CREATE)
-            registry.subscribe(acl_driver.process_sg_rule_notification,
+            registry.subscribe(self.process_sg_rule_notification,
                                resources.SECURITY_GROUP_RULE,
                                events.BEFORE_DELETE)
 
+    def process_sg_notification(self, resource, event, trigger, **kwargs):
+        self._acl_driver.process_sg_notification(event, **kwargs)
+
+    def process_sg_rule_notification(self, resource, event, trigger, **kwargs):
+        self._acl_driver.process_sg_rule_notification(event, **kwargs)
+
     def post_fork_initialize(self, resource, event, trigger, **kwargs):
-        self.acl.sync_acls()
+        self._acl_driver.sync_acls()
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
