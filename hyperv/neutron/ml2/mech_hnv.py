@@ -40,8 +40,7 @@ from hyperv.common.utils import retry_on_http_error
 from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
 from hyperv.neutron.ml2 import qos
-from hyperv.neutron.ml2 import hnv_acl
-
+from hyperv.neutron.ml2 import acl as hnv_acl
 
 from hnv_client import config as hnv_config
 from hnv_client.common import exception as hnv_exception
@@ -99,11 +98,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._setup_vif_port_bindings()
         self.qos = qos.HNVQosDriver(self)
         self.acl = hnv_acl.HNVAclDriver(self._plugin, self)
-        self.acl.sync_acls()
         self.subscribe(self.acl)
         self._cached_ports_instance_ids = {}
 
     def subscribe(self, acl_driver):
+        registry.subscribe(self.post_fork_initialize,
+                           resources.PROCESS,
+                           events.AFTER_INIT)
         if cfg.CONF.SECURITYGROUP.enable_security_group:
             registry.subscribe(acl_driver.process_sg_notification,
                                resources.SECURITY_GROUP,
@@ -117,6 +118,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             registry.subscribe(acl_driver.process_sg_rule_notification,
                                resources.SECURITY_GROUP_RULE,
                                events.BEFORE_DELETE)
+
+    def post_fork_initialize(self, resource, event, trigger, **kwargs):
+        self.acl.sync_acls()
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
@@ -190,35 +194,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         segments = context.network_segments
         for segment in segments:
             self._validate_segments(segment)
-
-    def _ensure_default_acl(self):
-        """
-        There should be an ACL that mirrors the behavior of the default ACL in
-        OpenStack. If one does not already exist, we create one. This function
-        should not be called from inside any _precommit hook.
-        """
-        try:
-            default_acl = self._acl_client(resource_id=constants.HNV_DEFAULT_NETWORK)
-            return default_acl
-        except hnv_exception.NotFound:
-            LOG.debug("Creating default ACL on HNV network controller")
-
-        allow_egress = client.ACLRules(
-                resource_id="Allow_Egress",
-                action="Allow",
-                destination_prefix="*",
-                destination_port_range="*",
-                source_prefix="*",
-                source_port_range="*",
-                description="Allow all egress traffic",
-                priority="103", rule_type="Outbound")
-        default_acl = client.AccessControlLists(
-                acl_rules=[allow_egress,],
-                resource_id=constants.HNV_DEFAULT_NETWORK,
-                inbound_action="Deny",
-                outbound_action="Allow")
-        default_acl.commit(wait=True)
-        return default_acl
 
     def _get_logical_network(self, network):
         ln = self._ln_client.get(resource_id=self._logicalNetworkID)
@@ -725,7 +700,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 port[portbindings.VIF_DETAILS].update(
                     {constants.HNV_PORT_PROFILE_ID: instance_id})
                 for segment in context.segments_to_bind:
-                    if self._check_supported_network_type(segment["network_type"])
+                    if self._check_supported_network_type(segment["network_type"]):
                         context.set_binding(segment[driver_api.ID],
                                 self.vif_type,
                                 {constants.HNV_PORT_PROFILE_ID: instance_id})
