@@ -20,8 +20,9 @@ from neutron.callbacks import events
 from hnv_client import client
 from requests.status_codes import codes
 from hyperv.common.utils import retry_on_http_error
+from oslo_log import log
 
-from hyperv.neutron import exception as hyperv_exc
+from hnv_client.common import exception as hnv_exception
 
 # CONF = cfg.CONF
 
@@ -36,6 +37,8 @@ ACL_PROP_MAP = {
     'default': "*",
     'address_default': {'IPv4': '0.0.0.0/0', 'IPv6': '::/0'}
 }
+
+LOG = log.getLogger(__name__)
 
 DEFAULT_RULE_PRIORITY=100
 _PROVIDER_NAME = "openstack"
@@ -62,16 +65,19 @@ class HNVAclDriver(object):
 
     def _create_acls_and_rules(self, sgs):
         for i in sgs:
-            LOG.debug("Creating new ACL %(security_group)s on NC" % {
-                'security_group': i})
             rules = self._process_rules(sgs[i])
             acl = client.AccessControlLists(
                 resource_id=i,
                 inbound_action="Deny",
                 outbound_action="Deny",
                 tags={"provider": _PROVIDER_NAME},
-                acl_rules=rules,
-                ).commit(wait=True)
+                acl_rules=rules[i]["rules"],
+                )
+            LOG.debug("Creating new ACL %(security_group)s on NC"
+                    "with payload %(payload)s" % {
+                'security_group': i,
+                'payload': acl.dump()})
+            acl.commit(wait=True)
 
     @retry_on_http_error(code=codes.precondition_failed)
     def _apply_nc_acl_rules(self, acl, rules):
@@ -86,14 +92,14 @@ class HNVAclDriver(object):
             LOG.debug("Syncing security group %(security_group)s" % {
                 'security_group': sg})
             rules = self._process_rules(db_sgs[sg])
-            self._apply_nc_acl_rules(nc_acls[sg], rules)
+            self._apply_nc_acl_rules(nc_acls[sg], rules[sg]["rules"])
 
     def sync_acls(self):
         nc_acls = client.AccessControlLists.get()
         nc_acl_list = {}
         db_sg_list = {}
         for i in nc_acls:
-            if i.tags and i.tags.get("provider") != _PROVIDER_NAME:
+            if not i.tags or i.tags.get("provider") != _PROVIDER_NAME:
                 # ignore ACL not added by us
                 continue
             if nc_acl_list.get(i.resource_id) is None:
@@ -102,8 +108,9 @@ class HNVAclDriver(object):
         db_security_groups = self._plugin.get_security_groups(
             self.admin_context)
         for i in db_security_groups:
+            LOG.debug(">> %r" % i)
             if db_sg_list.get(i["id"]) is None:
-                db_sg_list[i["id"]] = i["rules"]
+                db_sg_list[i["id"]] = i["security_group_rules"]
 
         nc_rule_set = set(nc_acl_list.keys())
         db_rule_set = set(db_sg_list.keys())
@@ -134,7 +141,7 @@ class HNVAclDriver(object):
             try:
                 acl = client.AccessControlLists.get(
                     resource_id=sg['id'])
-            except hyperv_exc.NotFound:
+            except hnv_exception.NotFound:
                 return
             acl.remove(resource_id=acl.resource_id, wait=True)
         return
@@ -153,15 +160,15 @@ class HNVAclDriver(object):
 
     def _create_acl_rule(self, sg_rule, sg_id):
         acl_list = self._process_rules(sg_rule)
-        rules = acl_list.get(sg_id, [])
-        for acl in rules:
+        rules = acl_list.get(sg_id, {"rules": []})
+        for acl in rules["rules"]:
             acl.commit(wait=True)
 
     def _delete_acl_rule(self, sg_rule, sg_id):
         try:
             acl = client.ACLRules.get(
                 parent_id=sg_id, resource_id=sg_rule["id"])
-        except hyperv_exc.NotFound:
+        except hnv_exception.NotFound:
             return
         client.ACLRules.remove(
             resource_id=sg_rule["id"], parent_id=sg_id, wait=True)
@@ -186,8 +193,8 @@ class HNVAclDriver(object):
         ips = []
         try:
             sg = client.AccessControlLists.get(resource_id=sg_id)
-        except hyperv_exc.NotFound:
-            return ips
+        except hnv_exception.NotFound:
+            return (ips, ip_config_cache)
 
         if sg.ip_configuration:
             for i in sg.ip_configuration:
@@ -197,7 +204,7 @@ class HNVAclDriver(object):
                 if not ip_config:
                     continue
                 ips.append(ip_config.private_ip_address)
-        return ips
+        return (ips, ip_config_cache)
 
     def _sanitize_protocol(self, protocol):
         if protocol in ("icmp", "ipv6-icmp", "icmpv6"):
@@ -220,6 +227,11 @@ class HNVAclDriver(object):
                 int(port_range_max))
         return port
 
+    def _sanitize_remote_ip_prefix(self, remote_ip, ethertype):
+        if remote_ip is None:
+            remote_ip = ACL_PROP_MAP["address_default"][ethertype]
+        return remote_ip
+
     def _get_acl_rule(self, rule, priority=DEFAULT_RULE_PRIORITY):
         direction = ACL_PROP_MAP["direction"][rule["direction"]]
         protocol = self._sanitize_protocol(rule["protocol"])
@@ -230,13 +242,15 @@ class HNVAclDriver(object):
         description = rule["description"]
 
         if direction == ACL_PROP_MAP["direction"]["egress"]:
-            destination_prefix = rule["remote_ip_prefix"]
+            destination_prefix = self._sanitize_remote_ip_prefix(
+                    rule["remote_ip_prefix"], rule["ethertype"])
             source_prefix = ACL_PROP_MAP["default"]
             destination_port_range = self._sanitize_port(rule)
             source_port_range = ACL_PROP_MAP["default"]
         else:
             destination_prefix = ACL_PROP_MAP["default"]
-            source_prefix = rule["remote_ip_prefix"]
+            source_prefix = self._sanitize_remote_ip_prefix(
+                    rule["remote_ip_prefix"], rule["ethertype"])
             destination_port_range = ACL_PROP_MAP["default"]
             source_port_range = self._sanitize_port(rule)
 
@@ -256,38 +270,46 @@ class HNVAclDriver(object):
             priority=priority)
         return rule
 
-    def _get_member_rules(self, rule, members):
+    def _get_member_rules(self, rule, members, priority=DEFAULT_RULE_PRIORITY):
         rules = []
         for i in members:
             version = netaddr.IPAddress(i).version
             tmp_rule = rule.copy()
             tmp_rule["id"] = "%s_%s" % (tmp_rule["id"], i)
             tmp_rule["remote_ip_prefix"] = "%s/%s" % (i, i.netmask_bits())
-            rule = self._get_acl_rule(tmp_rule)
+            rule = self._get_acl_rule(tmp_rule, priority=priority)
             if rule is None:
                 continue
+            priority += 1
             rules.append(rule)
+        return (rules, priority)
 
     def _process_rules(self, rules):
         sec_groups = {}
+        member_ips = []
+        prio = DEFAULT_RULE_PRIORITY
         if type(rules) is not list:
             rules = [rules,]
         for i in rules:
             sg_id = i["security_group_id"]
             tmp_rules = []
             if sec_groups.get(sg_id) is None:
-                sec_groups[sg_id] = []
+                sec_groups[sg_id] = {
+                        "priority": DEFAULT_RULE_PRIORITY,
+                        "rules": []}
             remote_group = i.get("remote_group_id", None)
             if remote_group:
                 member_ips, self._nc_ports = self._get_sg_members(
                     remote_group, self._nc_ports)
             if len(member_ips):
-                tmp_rules = self._get_member_rules(i, member_ips)
+                tmp_rules, sec_groups[sg_id]["priority"] = self._get_member_rules(
+                        i, member_ips, sec_groups[sg_id]["priority"])
             else:
-                rule = self._get_acl_rule(i)
+                rule = self._get_acl_rule(i, sec_groups[sg_id]["priority"])
                 if rule:
                     tmp_rules.append(rule)
+                    sec_groups[sg_id]["priority"] += 1
             for j in tmp_rules:
-                sec_groups[sg_id].append(j)
+                sec_groups[sg_id]["rules"].append(j)
         return sec_groups
 

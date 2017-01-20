@@ -1,4 +1,7 @@
 import requests
+from oslo_log import log as logging
+
+LOG = logging.getLogger(__name__)
 
 def retry_on_http_error(code, tries=5):
     def deco_retry(f):
