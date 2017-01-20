@@ -24,7 +24,7 @@ from oslo_log import log
 
 from hnv_client.common import exception as hnv_exception
 
-# CONF = cfg.CONF
+CONF = cfg.CONF
 
 ACL_PROP_MAP = {
     'direction': {'ingress': "Inbound",
@@ -50,6 +50,11 @@ class HNVAclDriver(object):
         self._driver = driver
         self.admin_context = n_context.get_admin_context()
         self._nc_ports = {}
+        # this will enable resynchronization in case of
+        # resources that exist in neutron but don't exist
+        # in the network controller
+        #TODO(gsamfira): take from config
+        self._heal = True
         # self._neutron_rules = neutron_rules
         # self._nc_rules = nc_rules
         # self._security_groups = {}
@@ -63,15 +68,49 @@ class HNVAclDriver(object):
         for i in acl_list:
             self._remove_acl(i)
 
+    def _get_drop_all_rules(self):
+        rules = []
+        drop_incomming = client.ACLRules(
+            resource_id="DropAllIncomming",
+            protocol="All",
+            rule_type="Inbound",
+            source_port_range="*",
+            source_prefix="*",
+            destination_port_range="*",
+            destination_prefix="*",
+            action=ACL_PROP_MAP["action"]["deny"],
+            description="Drop all incoming traffic by default",
+            priority=65000)
+        drop_outgoing = client.ACLRules(
+            resource_id="DropAllOutgoing",
+            protocol="All",
+            rule_type="Outbound",
+            source_port_range="*",
+            source_prefix="*",
+            destination_port_range="*",
+            destination_prefix="*",
+            action=ACL_PROP_MAP["action"]["deny"],
+            description="Drop all outgoing traffic by default",
+            priority=64999)
+        return [drop_incomming, drop_outgoing]
+
     def _create_acls_and_rules(self, sgs):
+        # NOTE(gsamfira): Fri Jan 20 16:15:20 EET 2017
+        # At the time of this writing the network controller
+        # that installs with the stable version of Windows Server 2016
+        # does not expose the inboundDefaultAction and outboundDefaultAction
+        # for ACLs. Adding default rules to drop all traffic, with the highest
+        # priority value that is user definable, to mimic DROP ALL policy.
+        default_rules = self._get_drop_all_rules()
         for i in sgs:
-            rules = self._process_rules(sgs[i])
+            processed_rules = self._process_rules(sgs[i])
+            default_rules.extend(processed_rules[i]["rules"])
             acl = client.AccessControlLists(
                 resource_id=i,
                 inbound_action="Deny",
                 outbound_action="Deny",
                 tags={"provider": _PROVIDER_NAME},
-                acl_rules=rules[i]["rules"],
+                acl_rules=default_rules,
                 )
             LOG.debug("Creating new ACL %(security_group)s on NC"
                     "with payload %(payload)s" % {
@@ -108,7 +147,6 @@ class HNVAclDriver(object):
         db_security_groups = self._plugin.get_security_groups(
             self.admin_context)
         for i in db_security_groups:
-            LOG.debug(">> %r" % i)
             if db_sg_list.get(i["id"]) is None:
                 db_sg_list[i["id"]] = i["security_group_rules"]
 
@@ -159,9 +197,21 @@ class HNVAclDriver(object):
             return self._delete_acl_rule(**options)
 
     def _create_acl_rule(self, sg_rule, sg_id):
+        try:
+            existing_rules = client.AccessControlLists.get(
+                resource_id=sg_id)
+        except hnv_exception.NotFound:
+            LOG.warning("Failed to find ACL with ID %(sgid)s"
+            "network controller may be out of sync" % {
+            'sgid': sg_id})
+            if self._heal:
+                LOG.warning("Attempting resync of ACLs")
+                self.sync_acls()
         acl_list = self._process_rules(sg_rule)
         rules = acl_list.get(sg_id, {"rules": []})
         for acl in rules["rules"]:
+            if acl in existing_rules.acl_rules:
+                continue
             acl.commit(wait=True)
 
     def _delete_acl_rule(self, sg_rule, sg_id):
@@ -287,7 +337,6 @@ class HNVAclDriver(object):
     def _process_rules(self, rules):
         sec_groups = {}
         member_ips = []
-        prio = DEFAULT_RULE_PRIORITY
         if type(rules) is not list:
             rules = [rules,]
         for i in rules:

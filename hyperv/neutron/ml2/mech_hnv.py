@@ -96,7 +96,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._dummy_address_space = client.AddressSpace(address_prefixes=["1.0.0.0/32"])
         self.agent_type = constants.AGENT_TYPE_HNV
         self._setup_vif_port_bindings()
-        self.qos = qos.HNVQosDriver(self)
+        self._qos_driver_property = None
         self._acl_driver_property = None
         self.subscribe()
         self._cached_ports_instance_ids = {}
@@ -106,6 +106,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if self._acl_driver_property is None:
             self._acl_driver_property = hnv_acl.HNVAclDriver(self)
         return self._acl_driver_property
+
+    @property
+    def _qos_driver(self):
+        if self._qos_driver_property is None:
+            self._qos_driver_property = qos.HNVQosDriver(self)
+        return self._qos_driver_property
 
     def subscribe(self):
         registry.subscribe(self.post_fork_initialize,
@@ -132,6 +138,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._acl_driver.process_sg_rule_notification(event, **kwargs)
 
     def post_fork_initialize(self, resource, event, trigger, **kwargs):
+        # initial ACL sync
+        self._acl_driver.sync_acls()
+        # Sync ports and apply any missing ACLs
+        self._sync_ports()
+        # second pass on ACL rules, and apply any member_ip addresses
+        # to existing rules
         self._acl_driver.sync_acls()
 
     def _get_nc_ports(self):
@@ -283,7 +295,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         network = context.current
         original_network = context.original
-        self.qos.update_network(network, original_network)
+        self._qos_driver.update_network(network, original_network)
 
     def delete_network_precommit(self, context):
         """Delete resources for a network.
@@ -610,7 +622,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return subnet
 
     def _get_port_settins(self, port):
-        qos_settings = self.qos.get_qos_options(port)
+        qos_settings = self._qos_driver.get_qos_options(port)
         port_settings = client.PortSettings(
             qos_settings=qos_settings)
         return port_settings
