@@ -46,8 +46,31 @@ from hyperv.neutron.ml2 import acl as hnv_acl
 from hnv_client import config as hnv_config
 from hnv_client.common import exception as hnv_exception
 
+from neutron.common import config
+
+
 LOG = log.getLogger(__name__)
 CONF = cfg.CONF
+
+class HNVWorker(worker.NeutronWorker):
+    def __init__(self, driver):
+        super(HNVWorker, self).__init__(worker_process_count=1)
+        self._driver = driver
+
+    def start(self):
+        super(HNVWorker, self).start()
+        self._driver._acl_driver.sync_acls()
+
+    def stop(self):
+        return
+
+    def wait(self):
+        return
+
+    @staticmethod
+    def reset():
+        config.reset_service()
+
 
 class HNVMechanismDriver(driver_api.MechanismDriver):
     """Hyper-V Network Virtualization driver.
@@ -115,9 +138,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return self._qos_driver_property
 
     def subscribe(self):
-        registry.subscribe(self.post_fork_initialize,
-                           resources.PROCESS,
-                           events.AFTER_INIT)
         if cfg.CONF.SECURITYGROUP.enable_security_group:
             registry.subscribe(self.process_sg_notification,
                                resources.SECURITY_GROUP,
@@ -138,17 +158,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def process_sg_rule_notification(self, resource, event, trigger, **kwargs):
         self._acl_driver.process_sg_rule_notification(event, **kwargs)
 
-    def post_fork_initialize(self, resource, event, trigger, **kwargs):
-        if trigger.im_class == HNVWorker:
-            LOG.debug("running post_fork_initialize")
-            # initial ACL sync
-            self._acl_driver.sync_acls()
-            # Sync ports and apply any missing ACLs
-            #self._sync_ports()
-            # second pass on ACL rules, and apply any member_ip addresses
-            # to existing rules
-            #self._acl_driver.sync_acls()
-
     #TODO(gsamfira): IMPLEMENT_ME
     def _sync_ports(self):
         pass
@@ -159,8 +168,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         Any driver that needs to run processes separate from the API or RPC
         workers, can return a sequence of NeutronWorker instances.
         """
-        # See doc/source/design/ovn_worker.rst for more details.
-        return [HNVWorker()]
+        LOG.debug("returning HNV Worker")
+        return (HNVWorker(self),)
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
@@ -568,14 +577,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             pass
         return
 
-    def get_workers(self):
-        """Get any NeutronWorker instances that should have their own process
-
-        Any driver that needs to run processes separate from the API or RPC
-        workers, can return a sequence of NeutronWorker instances.
-        """
-        return ()
-
     # TODO(gsamfira): IMPLEMENT_ME
     def _get_port_acl(self, port):
         return None
@@ -751,17 +752,3 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                                 "%(agent)s"),
                             {'pid': context.current['id'], 'agent': agent})
 
-
-class HNVWorker(worker.NeutronWorker):
-    def start(self):
-        super(HNVWorker, self).start()
-
-    def stop(self):
-        pass
-
-    def wait(self):
-        pass
-
-    @staticmethod
-    def reset():
-        config.reset_service()
