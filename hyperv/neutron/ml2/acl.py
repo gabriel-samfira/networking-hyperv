@@ -24,7 +24,7 @@ from oslo_log import log
 
 from hnv_client.common import exception as hnv_exception
 
-CONF = cfg.CONF
+# CONF = cfg.CONF
 
 ACL_PROP_MAP = {
     'direction': {'ingress': "Inbound",
@@ -168,6 +168,9 @@ class HNVAclDriver(object):
         self._create_acls_and_rules(new_secgroups)
 
     def process_sg_notification(self, event, **kwargs):
+        LOG.debug("Processing security group notification for %(sec_group)s" % {
+            'sec_group': kwargs.get('security_group'),
+            })
         sg = kwargs.get('security_group')
         if event == events.AFTER_CREATE:
             acl = client.AccessControlLists(
@@ -185,6 +188,9 @@ class HNVAclDriver(object):
         return
 
     def process_sg_rule_notification(self, event, **kwargs):
+        LOG.debug("Processing security group rule notification for %(sec_group)s" % {
+            'sec_group': kwargs.get('security_group_rule_id'),
+            })
         options = {}
         if event == events.AFTER_CREATE:
             options["sg_rule"] = kwargs.get('security_group_rule')

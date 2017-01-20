@@ -141,10 +141,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # initial ACL sync
         self._acl_driver.sync_acls()
         # Sync ports and apply any missing ACLs
-        self._sync_ports()
+        #self._sync_ports()
         # second pass on ACL rules, and apply any member_ip addresses
         # to existing rules
-        self._acl_driver.sync_acls()
+        #self._acl_driver.sync_acls()
+
+    #TODO(gsamfira): IMPLEMENT_ME
+    def _sync_ports(self):
+        pass
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
