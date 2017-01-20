@@ -118,11 +118,11 @@ class HNVAclDriver(object):
                 'payload': acl.dump()})
             acl.commit(wait=True)
 
-    @retry_on_http_error(code=codes.precondition_failed)
     def _apply_nc_acl_rules(self, acl, rules):
-        # refresh ACL. Allows us to handle situations where the resource
-        # has changed between the time we fetched it and the commit
-        acl = client.AccessControlLists.get(resource_id=acl.resource_id)
+        # we are syncing and we want to overwrite any existing rule.
+        # removing the etag will ensure we will not get a 412 error
+        # in case the resource changed in the meantime.
+        acl.etag = None
         acl.acl_rules = rules
         acl.commit()
 
