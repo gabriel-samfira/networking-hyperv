@@ -33,6 +33,7 @@ from neutron.extensions import portbindings
 from neutron.db import provisioning_blocks
 from neutron.callbacks import resources
 from neutron import context as n_context
+from neutron import worker
 
 from hyperv.common.i18n import _, _LE, _LI  # noqa
 from hnv_client import client
@@ -138,17 +139,28 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._acl_driver.process_sg_rule_notification(event, **kwargs)
 
     def post_fork_initialize(self, resource, event, trigger, **kwargs):
-        # initial ACL sync
-        self._acl_driver.sync_acls()
-        # Sync ports and apply any missing ACLs
-        #self._sync_ports()
-        # second pass on ACL rules, and apply any member_ip addresses
-        # to existing rules
-        #self._acl_driver.sync_acls()
+        if trigger.im_class == HNVWorker:
+            LOG.debug("running post_fork_initialize")
+            # initial ACL sync
+            self._acl_driver.sync_acls()
+            # Sync ports and apply any missing ACLs
+            #self._sync_ports()
+            # second pass on ACL rules, and apply any member_ip addresses
+            # to existing rules
+            #self._acl_driver.sync_acls()
 
     #TODO(gsamfira): IMPLEMENT_ME
     def _sync_ports(self):
         pass
+
+    def get_workers(self):
+        """Get any NeutronWorker instances that should have their own process
+
+        Any driver that needs to run processes separate from the API or RPC
+        workers, can return a sequence of NeutronWorker instances.
+        """
+        # See doc/source/design/ovn_worker.rst for more details.
+        return [HNVWorker()]
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
@@ -738,3 +750,18 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 LOG.warning(_LW("Refusing to bind port %(pid)s to dead agent: "
                                 "%(agent)s"),
                             {'pid': context.current['id'], 'agent': agent})
+
+
+class HNVWorker(worker.NeutronWorker):
+    def start(self):
+        super(HNVWorker, self).start()
+
+    def stop(self):
+        pass
+
+    def wait(self):
+        pass
+
+    @staticmethod
+    def reset():
+        config.reset_service()

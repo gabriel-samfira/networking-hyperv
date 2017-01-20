@@ -102,7 +102,8 @@ class HNVAclDriver(object):
         # for ACLs. Adding default rules to drop all traffic, with the highest
         # priority value that is user definable, to mimic DROP ALL policy.
         default_rules = self._get_drop_all_rules()
-        for i in sgs:
+        LOG.debug("Running _create_acls_and_rules")
+        for i in sgs.keys():
             processed_rules = self._process_rules(sgs[i])
             default_rules.extend(processed_rules[i]["rules"])
             acl = client.AccessControlLists(
@@ -112,7 +113,7 @@ class HNVAclDriver(object):
                 tags={"provider": _PROVIDER_NAME},
                 acl_rules=default_rules,
                 )
-            LOG.debug("Creating new ACL %(security_group)s on NC"
+            LOG.debug("Creating new ACL %(security_group)s on NC "
                     "with payload %(payload)s" % {
                 'security_group': i,
                 'payload': acl.dump()})
