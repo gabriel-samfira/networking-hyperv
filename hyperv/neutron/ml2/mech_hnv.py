@@ -173,6 +173,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if type(ports) is not list:
             ports = [ports,]
         for i in ports:
+            self._acl_driver.remove_member_from_sg(i)
             self._remove_nc_port(i)
 
     def _get_port_member_ips(self, ports):
@@ -211,9 +212,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return ips
 
     def _create_ports_in_nc(self, ports):
-        for i in ports.keys():
-            network = i.get("network_id")
-            self._bind_port_on_network_controller(port, network)
+        insance_ids = {}
+        if type(ports) is not list:
+            ports = [ports,]
+        for port in ports:
+            network = port.get("network_id")
+            self._acl_driver.add_member_to_sgs(port)
+            instance_ids[port["id"]] = self._bind_port_on_network_controller(
+                port, network)
 
     #TODO(gsamfira): IMPLEMENT_ME
     def _sync_ports(self):
@@ -228,10 +234,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         must_sync = list(db_set & nc_set)
         
         # to_remove = {k: nc_ports[k] for k in must_remove}
-        to_add = {k: db_ports[k] for k in must_add}
+        to_add = [db_ports[k] for k in must_add]
         to_sync_db = {k: db_ports[k] for k in must_sync}
 
         self._remove_nc_ports(must_remove)
+        self._create_ports_in_nc(to_add)
 
 
     def _get_db_ports(self):
@@ -603,8 +610,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     'network': network.current["id"],
                     }
                 )
-        instance_id = self._bind_port_on_network_controller(port, network.current["id"])
-        self._cached_ports_instance_ids[port["id"]] = instance_id
+        instance_ids = self._create_ports_in_nc(port)
+        self._cached_ports_instance_ids[port["id"]] = instance_ids[port["id"]]
 
 
     def update_port_precommit(self, context):
@@ -651,9 +658,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             pass
         return
 
-    # TODO(gsamfira): IMPLEMENT_ME
     def _get_port_acl(self, port):
-        return None
+        """
+        Apply ACL on port. ACL rules for remote groups are added on port create.
+        """
+        sg_ids = port.get("security_groups", [])
+        acls = self._acl_driver._get_nc_acls(ids=sg_ids)
+        return (acls.values() if len(acl.values()) > 0 else None)
 
     def _get_ip_resource_id(self, ip, port_id):
         address = ip.get("ip_address")
@@ -694,7 +705,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             #TODO(gsamfira): Notify neutron L2 agent of the new instance ID
             #for this port, as that needs to be set on the VM switch port
             #for the network controller to be able to control it
-            instance_id = self._bind_port_on_network_controller(port, network_id)
+            instance_ids = self._create_ports_in_nc(port)
+            instance_id = instance_ids[port["id"]]
             port[portbindings.VIF_DETAILS].update(
                 {constants.HNV_PORT_PROFILE_ID: instance_id})
             return instance_id

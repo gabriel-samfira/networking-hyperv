@@ -136,12 +136,15 @@ class HNVAclDriver(object):
             rules = self._process_rules(db_sgs[sg])
             self._apply_nc_acl_rules(nc_acls[sg], rules[sg]["rules"])
 
-    def _get_nc_acls(self):
+    def _get_nc_acls(self, ids=None):
+        # TODO(gsamfira): Cache this value
         nc_acls = client.AccessControlLists.get()
         nc_acl_list = {}
         for i in nc_acls:
             if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
                 # ignore ACL not added by us
+                continue
+            if ids and i.resource_id not in ids:
                 continue
             if nc_acl_list.get(i.resource_id) is None:
                 nc_acl_list[i.resource_id] = i
@@ -350,10 +353,11 @@ class HNVAclDriver(object):
     def _get_member_rule_id(self, sg_rule_id, ip):
         return "%s_%s" % (sg_rule_id, ip)
 
-    def _remove_member_from_sg(self, port):
+    def _get_sgs_member_rules_for_port(self, port):
         sgs = port.get("security_groups", [])
         if len(sgs) == 0:
-            return
+            return []
+        ret = []
         rules = self._plugin.get_security_group_rules(
             self.admin_context,
             filters={"remote_group_id": sgs})
@@ -361,8 +365,20 @@ class HNVAclDriver(object):
         for i in rules:
             remote_sg = i.get("remote_group_id")
             member_rules = self._get_member_rules(i, member_ips.get(remote_sg, []))
-            for j in member_rules:
-                j.remove(resource_id=j.resource_id, parent_id=j.parent_id)
+            ret.extend(member_rules)
+        return ret
+
+    def add_member_to_sgs(self, port):
+        rules = self._get_sgs_member_rules_for_port(port)
+        for i in rules:
+            i.commit(wait=True)
+        return
+
+    # this should be called when a port is removed in neutron
+    def remove_member_from_sg(self, port):
+        rules = self._get_sgs_member_rules_for_port(port)
+        for i in rules:
+            i.remove(resource_id=i.resource_id, parent_id=i.parent_id)
         return
 
     def _get_member_rules(self, rule, members, priority=DEFAULT_RULE_PRIORITY):
