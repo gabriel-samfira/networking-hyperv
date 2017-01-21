@@ -166,18 +166,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def process_sg_rule_notification(self, resource, event, trigger, **kwargs):
         self._acl_driver.process_sg_rule_notification(event, **kwargs)
 
-    def _remove_nc_port(self, port_id):
-        client.NetworkInterfaces.remove(resource_id=port_id)
+    def _remove_nc_port(self, port):
+        client.NetworkInterfaces.remove(resource_id=port)
 
-    def _remove_nc_ports(self, port_ids):
-        if type(port_ids) is not list:
-            port_ids = [port_ids,]
-        for i in port_ids:
+    def _remove_nc_ports(self, ports):
+        if type(ports) is not list:
+            ports = [ports,]
+        for i in ports:
             self._remove_nc_port(i)
-
-    def _get_sg_rules_for_remote_sg(self, sg_id):
-        get_security_groups(ctx)
-        return []
 
     def _get_port_member_ips(self, ports):
         # While this works well for ports that are still in neutron db,
@@ -189,11 +185,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # Alternatively we can first remove ports from the network controller
         # that have disappeared from neutron, and then sync ACL rules, followed
         # by adding new ports.
-        if type(ports) is not dict:
-            raise ValueError("Invalid ports object")
+        if type(ports) is not list:
+            ports = [ports,]
         ips = {}
-        for i in ports.keys():
-            port = ports[i]
+        for port in ports:
             port_ips = set()
             sgs = port.get("security_groups", [])
             fixed_ips = port.get("fixed_ips", [])
@@ -232,11 +227,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         must_add = list(db_set - nc_set)
         must_sync = list(db_set & nc_set)
         
-        to_remove = {k: nc_ports[k] for k in must_remove}
+        # to_remove = {k: nc_ports[k] for k in must_remove}
         to_add = {k: db_ports[k] for k in must_add}
         to_sync_db = {k: db_ports[k] for k in must_sync}
 
-        self._remove_nc_ports(to_remove)
+        self._remove_nc_ports(must_remove)
 
 
     def _get_db_ports(self):

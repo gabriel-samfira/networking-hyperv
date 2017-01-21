@@ -136,33 +136,40 @@ class HNVAclDriver(object):
             rules = self._process_rules(db_sgs[sg])
             self._apply_nc_acl_rules(nc_acls[sg], rules[sg]["rules"])
 
-    def sync_acls(self):
+    def _get_nc_acls(self):
         nc_acls = client.AccessControlLists.get()
         nc_acl_list = {}
-        db_sg_list = {}
         for i in nc_acls:
             if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
                 # ignore ACL not added by us
                 continue
             if nc_acl_list.get(i.resource_id) is None:
                 nc_acl_list[i.resource_id] = i
+        return nc_acl_list
 
+    def _get_db_acls(self):
+        db_sg_list = {}
         db_security_groups = self._plugin.get_security_groups(
             self.admin_context)
         for i in db_security_groups:
             if db_sg_list.get(i["id"]) is None:
                 db_sg_list[i["id"]] = i["security_group_rules"]
+        return db_sg_list
 
-        nc_rule_set = set(nc_acl_list.keys())
-        db_rule_set = set(db_sg_list.keys())
+    def sync_acls(self):
+        nc_acls = self._get_nc_acls()
+        db_acls = self._get_db_acls()
+
+        nc_rule_set = set(nc_acls.keys())
+        db_rule_set = set(db_acls.keys())
 
         must_remove = list(nc_rule_set - db_rule_set)
         must_add = list(db_rule_set - nc_rule_set)
         sync = list(db_rule_set & nc_rule_set)
 
-        new_secgroups = {k: db_sg_list[k] for k in must_add}
-        sync_db_rules = {k: db_sg_list[k] for k in sync}
-        sync_nc_rules = {k: nc_acl_list[k] for k in sync}
+        new_secgroups = {k: db_acls[k] for k in must_add}
+        sync_db_rules = {k: db_acls[k] for k in sync}
+        sync_nc_rules = {k: nc_acls[k] for k in sync}
         self._remove_acls(must_remove)
         # sync existing security groups first. This will allow rules
         # with remote_group_ids to pick up all members of that security group
@@ -218,39 +225,45 @@ class HNVAclDriver(object):
                 self.sync_acls()
         acl_list = self._process_rules(sg_rule)
         rules = acl_list.get(sg_id, {"rules": []})
+        should_commit = False
         for acl in rules["rules"]:
             if acl in existing_rules.acl_rules:
                 continue
-            acl.commit(wait=True)
+            existing_rules.acl_rules.append(acl)
+            should_commit = True
+        if should_commit:
+            existing_rules.commit(wait=True)
 
     def _delete_acl_rule(self, sg_rule, sg_id):
-        try:
-            acl = client.ACLRules.get(
-                parent_id=sg_id, resource_id=sg_rule["id"])
-        except hnv_exception.NotFound:
-            return
-        client.ACLRules.remove(
-            resource_id=sg_rule["id"], parent_id=sg_id, wait=True)
+        remote_group = sg_rule.get(remote_group_id, None)
+        if remote_group:
+            member_ips = self._get_member_ips()
+            rules = self._get_member_rules(sg_rule, member_ips.get(remote_group, []))
+            for rule in rules:
+                rule.remove(resource_id=rule.resource_id, parent_id=rule.parent_id)
+        else:
+            client.ACLRules.remove(
+                resource_id=sg_rule["id"], parent_id=sg_id, wait=True)
 
-    def _get_ip_configs(self):
-        ip_configs = {}
-        ports = client.NetworkInterfaces.get()
-        for port in ports:
-            for ip in port.ip_configurations:
-                ref = ip.get("resourceRef")
-                ip_configs[ref] = ip
-        return ip_configs
+    # def _get_ip_configs(self):
+    #     ip_configs = {}
+    #     ports = client.NetworkInterfaces.get()
+    #     for port in ports:
+    #         for ip in port.ip_configurations:
+    #             ref = ip.get("resourceRef")
+    #             ip_configs[ref] = ip
+    #     return ip_configs
 
-    def _get_ip_from_cache(self, ref, ip_config_cache):
-        ip = ip_config_cache.get(ref, False)
-        if not ip:
-            # refresh cache
-            ip_config_cache = self._get_ip_configs()
-        return (ip_config_cache.get(ref), ip_config_cache)
+    # def _get_ip_from_cache(self, ref, ip_config_cache):
+    #     ip = ip_config_cache.get(ref, False)
+    #     if not ip:
+    #         # refresh cache
+    #         ip_config_cache = self._get_ip_configs()
+    #     return (ip_config_cache.get(ref), ip_config_cache)
 
     def _get_member_ips(self):
         db_ports = self._driver._get_db_ports()
-        members = self._driver._get_port_member_ips(db_ports)
+        members = self._driver._get_port_member_ips(db_ports.values())
         return members
 
     # def _get_sg_members(self, sg_id, ip_config_cache):
@@ -334,6 +347,24 @@ class HNVAclDriver(object):
             priority=priority)
         return rule
 
+    def _get_member_rule_id(self, sg_rule_id, ip):
+        return "%s_%s" % (sg_rule_id, ip)
+
+    def _remove_member_from_sg(self, port):
+        sgs = port.get("security_groups", [])
+        if len(sgs) == 0:
+            return
+        rules = self._plugin.get_security_group_rules(
+            self.admin_context,
+            filters={"remote_group_id": sgs})
+        member_ips = self._driver._get_port_member_ips(port)
+        for i in rules:
+            remote_sg = i.get("remote_group_id")
+            member_rules = self._get_member_rules(i, member_ips.get(remote_sg, []))
+            for j in member_rules:
+                j.remove(resource_id=j.resource_id, parent_id=j.parent_id)
+        return
+
     def _get_member_rules(self, rule, members, priority=DEFAULT_RULE_PRIORITY):
         rules = []
         for member in members:
@@ -342,7 +373,7 @@ class HNVAclDriver(object):
             tmp_rule = rule.copy()
             if tmp_rule["ethertype"] != ACL_PROP_MAP['ethertype'][ip.version]:
                 continue
-            tmp_rule["id"] = "%s_%s" % (tmp_rule["id"], member)
+            tmp_rule["id"] = self._get_member_rule_id(tmp_rule["id"], member)
             tmp_rule["remote_ip_prefix"] = "%s/%s" % (member, ip.netmask_bits())
             LOG.debug("Getting ACL rule for %(remote_ip)s with protocol %(protocol)s" % {
                 'remote_ip': tmp_rule["remote_ip_prefix"],
