@@ -21,6 +21,8 @@ from hnv_client import client
 from requests.status_codes import codes
 from hyperv.common.utils import retry_on_http_error
 from oslo_log import log
+from hyperv.neutron import constants
+
 
 from hnv_client.common import exception as hnv_exception
 
@@ -41,7 +43,6 @@ ACL_PROP_MAP = {
 LOG = log.getLogger(__name__)
 
 DEFAULT_RULE_PRIORITY=100
-_PROVIDER_NAME = "openstack"
 
 class HNVAclDriver(object):
 
@@ -110,7 +111,7 @@ class HNVAclDriver(object):
                 resource_id=i,
                 inbound_action="Deny",
                 outbound_action="Deny",
-                tags={"provider": _PROVIDER_NAME},
+                tags={"provider": constants.HNV_PROVIDER_NAME},
                 acl_rules=default_rules,
                 )
             LOG.debug("Creating new ACL %(security_group)s on NC "
@@ -139,7 +140,7 @@ class HNVAclDriver(object):
         nc_acl_list = {}
         db_sg_list = {}
         for i in nc_acls:
-            if not i.tags or i.tags.get("provider") != _PROVIDER_NAME:
+            if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
                 # ignore ACL not added by us
                 continue
             if nc_acl_list.get(i.resource_id) is None:
@@ -178,7 +179,7 @@ class HNVAclDriver(object):
                 resource_id=sg['id'],
                 inbound_action="Deny",
                 outbound_action="Deny",
-                tags={"provider": _PROVIDER_NAME}).commit(wait=True)
+                tags={"provider": constants.HNV_PROVIDER_NAME}).commit(wait=True)
         elif event == events.BEFORE_DELETE:
             try:
                 acl = client.AccessControlLists.get(
@@ -246,22 +247,27 @@ class HNVAclDriver(object):
             ip_config_cache = self._get_ip_configs()
         return (ip_config_cache.get(ref), ip_config_cache)
 
-    def _get_sg_members(self, sg_id, ip_config_cache):
-        ips = []
-        try:
-            sg = client.AccessControlLists.get(resource_id=sg_id)
-        except hnv_exception.NotFound:
-            return (ips, ip_config_cache)
+    def _get_member_ips(self):
+        db_ports = self._driver._get_db_ports()
+        members = self._driver._get_port_member_ips(db_ports)
+        return members
 
-        if sg.ip_configuration:
-            for i in sg.ip_configuration:
-                ref = i.get("resourceRef")
-                ip_config, ip_config_cache = self._get_ip_from_cache(
-                    ref, ip_config_cache)
-                if not ip_config:
-                    continue
-                ips.append(ip_config.private_ip_address)
-        return (ips, ip_config_cache)
+    # def _get_sg_members(self, sg_id, ip_config_cache):
+    #     ips = []
+    #     try:
+    #         sg = client.AccessControlLists.get(resource_id=sg_id)
+    #     except hnv_exception.NotFound:
+    #         return (ips, ip_config_cache)
+
+    #     if sg.ip_configuration:
+    #         for i in sg.ip_configuration:
+    #             ref = i.get("resourceRef")
+    #             ip_config, ip_config_cache = self._get_ip_from_cache(
+    #                 ref, ip_config_cache)
+    #             if not ip_config:
+    #                 continue
+    #             ips.append(ip_config.private_ip_address)
+    #     return (ips, ip_config_cache)
 
     def _sanitize_protocol(self, protocol):
         if protocol in ("icmp", "ipv6-icmp", "icmpv6"):
@@ -343,7 +349,7 @@ class HNVAclDriver(object):
 
     def _process_rules(self, rules):
         sec_groups = {}
-        member_ips = []
+        member_ips = self._get_member_ips()
         if type(rules) is not list:
             rules = [rules,]
         for i in rules:
@@ -355,11 +361,10 @@ class HNVAclDriver(object):
                         "rules": []}
             remote_group = i.get("remote_group_id", None)
             if remote_group:
-                member_ips, self._nc_ports = self._get_sg_members(
-                    remote_group, self._nc_ports)
-            if len(member_ips):
+                sg_members = member_ips.get(remote_group, [])
+            if len(sg_members):
                 tmp_rules, sec_groups[sg_id]["priority"] = self._get_member_rules(
-                        i, member_ips, sec_groups[sg_id]["priority"])
+                        i, sg_members, sec_groups[sg_id]["priority"])
             else:
                 rule = self._get_acl_rule(i, sec_groups[sg_id]["priority"])
                 if rule:

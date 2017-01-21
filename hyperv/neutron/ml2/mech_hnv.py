@@ -14,6 +14,8 @@
 
 import json
 import requests
+import netaddr
+
 from requests.status_codes import codes
 
 from oslo_config import cfg
@@ -59,7 +61,13 @@ class HNVWorker(worker.NeutronWorker):
 
     def start(self):
         super(HNVWorker, self).start()
+        # Sync ACLs in network controller
         self._driver._acl_driver.sync_acls()
+        # sync ports. This returns a dict of security group
+        # ids with an array of member ip addresses
+        member_ips = self._driver._sync_ports()
+        # update all ACLs with the appropriate member ips
+        self._driver._acl_driver.update_member_ips(member_ips)
 
     def stop(self):
         return
@@ -158,24 +166,91 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def process_sg_rule_notification(self, resource, event, trigger, **kwargs):
         self._acl_driver.process_sg_rule_notification(event, **kwargs)
 
+    def _remove_nc_port(self, port_id):
+        client.NetworkInterfaces.remove(resource_id=port_id)
+
+    def _remove_nc_ports(self, port_ids):
+        if type(port_ids) is not list:
+            port_ids = [port_ids,]
+        for i in port_ids:
+            self._remove_nc_port(i)
+
+    def _get_sg_rules_for_remote_sg(self, sg_id):
+        get_security_groups(ctx)
+        return []
+
+    def _get_port_member_ips(self, ports):
+        # While this works well for ports that are still in neutron db,
+        # we also need to find all the security group rules of ports that
+        # have been removed from neutron, but not yet synced to the network
+        # controller. There is no way to get member ip addresses from neutron
+        # at that point. We will need to infer from what information we have in
+        # the API.
+        # Alternatively we can first remove ports from the network controller
+        # that have disappeared from neutron, and then sync ACL rules, followed
+        # by adding new ports.
+        if type(ports) is not list:
+            ports = [ports,]
+        ips = {}
+        for i in ports:
+            port_ips = set()
+            sgs = i.get("security_groups", [])
+            fixed_ips = i.get("fixed_ips", [])
+            address_pairs = i.get("allowed_address_pairs", [])
+            # Note (gsamfira)
+            # We don't really care about mac addresses in HNV. We can't
+            # really support allowed_address_pairs at the moment, but I am
+            # adding those addresses to ACLs anyway, in case we manage to
+            # support it in the future, and for potential interoperability
+            # with other VTEPs that do support this feature.
+            fixed_ips.update(address_pairs)
+            for f_ip in fixed_ips:
+                port_ips.add(f_ip.get("ip_address"))
+            for sg in sgs:
+                if ips.get(sg) is None:
+                    ips[sg] = list(port_ips)
+        return ips
+
+    def _create_ports_in_nc(self, ports):
+        for i in ports.keys():
+            network = i.get("network_id")
+            self._bind_port_on_network_controller(port, network)
+
     #TODO(gsamfira): IMPLEMENT_ME
     def _sync_ports(self):
-        pass
+        nc_ports = self._get_nc_ports()
+        db_ports = self._get_db_ports()
 
-    def get_workers(self):
-        """Get any NeutronWorker instances that should have their own process
+        nc_set = set(nc_ports.keys())
+        db_set = set(db_ports.keys())
 
-        Any driver that needs to run processes separate from the API or RPC
-        workers, can return a sequence of NeutronWorker instances.
-        """
-        LOG.debug("returning HNV Worker")
-        return (HNVWorker(self),)
+        must_remove = list(nc_set - db_set)
+        must_add = list(db_set - nc_set)
+        must_sync = list(db_set & nc_set)
+        
+        to_remove = {k: nc_ports[k] for k in must_remove}
+        to_add = {k: db_ports[k] for k in must_add}
+        to_sync_db = {k: db_ports[k] for k in must_sync}
+
+        self._remove_nc_ports(to_remove)
+
+
+    def _get_db_ports(self):
+        admin_context = n_context.get_admin_context()
+        db_ports = self._plugin.get_ports(admin_context)
+        ports = {}
+        for i in db_ports:
+            if not ports.get(i["id"]):
+                ports[i["id"]] = i
+        return ports
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
         ports = client.NetworkInterfaces.get()
         port_ids = {}
         for i in ports:
+            if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
+                continue
             port_ids[i.resource_id] = i
         return port_ids
 
@@ -631,7 +706,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
     # TODO(gsamfira): IMPLEMENT_ME
     def _confirm_ip_in_subnet(self, ip, subnet):
-        return True
+        network = netaddr.IPNetwork(subnet)
+        return (ip in network)
 
     def _get_subnet_from_neutron(self, subnet_id):
         admin_context = n_context.get_admin_context()
@@ -652,7 +728,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         dns_nameservers = neutron_subnet.get("dns_nameservers", [])
         cached_subnets, subnet_obj = self._get_subnet_from_cache(
             subnet_id, network_id, cached_subnets)
-        if not self._confirm_ip_in_subnet(ip["ip_address"], subnet_obj.address_prefix):
+        if not self._confirm_ip_in_subnet(ip["ip_address"],
+            subnet_obj.address_prefix):
             # TODO(gsamfira): replace ValueError with module specific exception
             raise ValueError("fixed_ip %s is not part of subnet %s" % (
                 ip["ip_address"], subnet_obj.address_prefix))
@@ -682,6 +759,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             raise ValueError("Could not build valid IP address configurations")
         return {
             "resource_id": port["id"],
+            "tags": {"provider": constants.HNV_PROVIDER_NAME},
             "dns_settings": {"DnsServers": list(dns_nameservers)},
             "ip_configurations": ipConfigurations,
             "mac_address": mac_address,
@@ -752,3 +830,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                                 "%(agent)s"),
                             {'pid': context.current['id'], 'agent': agent})
 
+    def get_workers(self):
+        """Get any NeutronWorker instances that should have their own process
+
+        Any driver that needs to run processes separate from the API or RPC
+        workers, can return a sequence of NeutronWorker instances.
+        """
+        # this worker simply does a one-off sync of the NB API of the
+        # Network Controller with what neutron has in its database
+        return (HNVWorker(self),)
