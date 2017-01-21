@@ -652,10 +652,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         deleted.
         """
         port = context.current
-        try:
-            client.NetworkInterfaces.remove(resource_id=port["id"], wait=True)
-        except hnv_exception.NotFound:
-            pass
+        self._remove_nc_ports(port)
         return
 
     def _get_port_acl(self, port):
