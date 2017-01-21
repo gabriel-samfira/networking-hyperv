@@ -11,7 +11,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 #
-
+import json
 import netaddr
 
 # from oslo_config import cfg
@@ -37,6 +37,7 @@ ACL_PROP_MAP = {
     'action': {'allow': "Allow",
                'deny': "Deny"},
     'default': "*",
+    'ethertype': {4: "IPv4", 6: "IPv6"},
     'address_default': {'IPv4': '0.0.0.0/0', 'IPv6': '::/0'}
 }
 
@@ -102,9 +103,9 @@ class HNVAclDriver(object):
         # does not expose the inboundDefaultAction and outboundDefaultAction
         # for ACLs. Adding default rules to drop all traffic, with the highest
         # priority value that is user definable, to mimic DROP ALL policy.
-        default_rules = self._get_drop_all_rules()
         LOG.debug("Running _create_acls_and_rules")
         for i in sgs.keys():
+            default_rules = self._get_drop_all_rules()
             processed_rules = self._process_rules(sgs[i])
             default_rules.extend(processed_rules[i]["rules"])
             acl = client.AccessControlLists(
@@ -335,16 +336,22 @@ class HNVAclDriver(object):
 
     def _get_member_rules(self, rule, members, priority=DEFAULT_RULE_PRIORITY):
         rules = []
-        for i in members:
-            version = netaddr.IPAddress(i).version
+        for member in members:
+            r = None
+            ip = netaddr.IPAddress(member)
             tmp_rule = rule.copy()
-            tmp_rule["id"] = "%s_%s" % (tmp_rule["id"], i)
-            tmp_rule["remote_ip_prefix"] = "%s/%s" % (i, i.netmask_bits())
-            rule = self._get_acl_rule(tmp_rule, priority=priority)
-            if rule is None:
+            if tmp_rule["ethertype"] != ACL_PROP_MAP['ethertype'][ip.version]:
+                continue
+            tmp_rule["id"] = "%s_%s" % (tmp_rule["id"], member)
+            tmp_rule["remote_ip_prefix"] = "%s/%s" % (member, ip.netmask_bits())
+            LOG.debug("Getting ACL rule for %(remote_ip)s with protocol %(protocol)s" % {
+                'remote_ip': tmp_rule["remote_ip_prefix"],
+                'protocol': tmp_rule["protocol"]})
+            r = self._get_acl_rule(tmp_rule, priority=priority)
+            if r is None:
                 continue
             priority += 1
-            rules.append(rule)
+            rules.append(r)
         return (rules, priority)
 
     def _process_rules(self, rules):
@@ -353,6 +360,7 @@ class HNVAclDriver(object):
         if type(rules) is not list:
             rules = [rules,]
         for i in rules:
+            sg_members = []
             sg_id = i["security_group_id"]
             tmp_rules = []
             if sec_groups.get(sg_id) is None:
@@ -361,10 +369,10 @@ class HNVAclDriver(object):
                         "rules": []}
             remote_group = i.get("remote_group_id", None)
             if remote_group:
-                sg_members = member_ips.get(remote_group, [])
-            if len(sg_members):
+                sg_members = member_ips.get(remote_group, set())
+            if remote_group and len(sg_members) > 0:
                 tmp_rules, sec_groups[sg_id]["priority"] = self._get_member_rules(
-                        i, sg_members, sec_groups[sg_id]["priority"])
+                        i, list(sg_members), sec_groups[sg_id]["priority"])
             else:
                 rule = self._get_acl_rule(i, sec_groups[sg_id]["priority"])
                 if rule:

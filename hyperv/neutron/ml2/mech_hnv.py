@@ -65,9 +65,9 @@ class HNVWorker(worker.NeutronWorker):
         self._driver._acl_driver.sync_acls()
         # sync ports. This returns a dict of security group
         # ids with an array of member ip addresses
-        member_ips = self._driver._sync_ports()
+        #member_ips = self._driver._sync_ports()
         # update all ACLs with the appropriate member ips
-        self._driver._acl_driver.update_member_ips(member_ips)
+        #self._driver._acl_driver.update_member_ips(member_ips)
 
     def stop(self):
         return
@@ -189,26 +189,30 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # Alternatively we can first remove ports from the network controller
         # that have disappeared from neutron, and then sync ACL rules, followed
         # by adding new ports.
-        if type(ports) is not list:
-            ports = [ports,]
+        if type(ports) is not dict:
+            raise ValueError("Invalid ports object")
         ips = {}
-        for i in ports:
+        for i in ports.keys():
+            port = ports[i]
             port_ips = set()
-            sgs = i.get("security_groups", [])
-            fixed_ips = i.get("fixed_ips", [])
-            address_pairs = i.get("allowed_address_pairs", [])
+            sgs = port.get("security_groups", [])
+            fixed_ips = port.get("fixed_ips", [])
+            address_pairs = port.get("allowed_address_pairs", [])
             # Note (gsamfira)
             # We don't really care about mac addresses in HNV. We can't
             # really support allowed_address_pairs at the moment, but I am
             # adding those addresses to ACLs anyway, in case we manage to
             # support it in the future, and for potential interoperability
             # with other VTEPs that do support this feature.
-            fixed_ips.update(address_pairs)
+            fixed_ips.extend(address_pairs)
             for f_ip in fixed_ips:
                 port_ips.add(f_ip.get("ip_address"))
             for sg in sgs:
                 if ips.get(sg) is None:
-                    ips[sg] = list(port_ips)
+                    ips[sg] = port_ips
+                else:
+                    for ip in port_ips:
+                        ips[sg].add(ip)
         return ips
 
     def _create_ports_in_nc(self, ports):
