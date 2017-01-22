@@ -63,11 +63,8 @@ class HNVWorker(worker.NeutronWorker):
         super(HNVWorker, self).start()
         # Sync ACLs in network controller
         self._driver._acl_driver.sync_acls()
-        # sync ports. This returns a dict of security group
-        # ids with an array of member ip addresses
-        #member_ips = self._driver._sync_ports()
-        # update all ACLs with the appropriate member ips
-        #self._driver._acl_driver.update_member_ips(member_ips)
+        # sync ports
+        self._driver._sync_ports()
 
     def stop(self):
         return
@@ -131,7 +128,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._qos_driver_property = None
         self._acl_driver_property = None
         self.subscribe()
-        self._cached_ports_instance_ids = {}
+        self._cached_port_iids = {}
 
     @property
     def _acl_driver(self):
@@ -212,14 +209,21 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return ips
 
     def _create_ports_in_nc(self, ports):
-        insance_ids = {}
         if type(ports) is not list:
             ports = [ports,]
         for port in ports:
             network = port.get("network_id")
             self._acl_driver.add_member_to_sgs(port)
-            instance_ids[port["id"]] = self._bind_port_on_network_controller(
+            self._cached_port_iids[port["id"]] = self._bind_port_on_nc(
                 port, network)
+        return
+
+    def _sync_ports(self, ports):
+        if type(ports) is not list:
+            ports = [ports,]
+        for i in ports:
+            self.update_port(port, port["network_id"])
+        return
 
     #TODO(gsamfira): IMPLEMENT_ME
     def _sync_ports(self):
@@ -239,7 +243,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
         self._remove_nc_ports(must_remove)
         self._create_ports_in_nc(to_add)
-
+        self._sync_ports(to_sync_db)
 
     def _get_db_ports(self):
         admin_context = n_context.get_admin_context()
@@ -611,7 +615,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     }
                 )
         instance_ids = self._create_ports_in_nc(port)
-        self._cached_ports_instance_ids[port["id"]] = instance_ids[port["id"]]
+        self._cached_port_iids[port["id"]] = instance_ids[port["id"]]
 
 
     def update_port_precommit(self, context):
@@ -659,7 +663,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         self._remove_nc_ports(port)
-        return
 
     def _get_port_acl(self, port):
         """
@@ -781,7 +784,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             "mac_allocation_method": constants.HNV_METHOD_STATIC,
         }
 
-    def _bind_port_on_network_controller(self, port, network_id):
+    def _bind_port_on_nc(self, port, network_id):
         port_options = self.get_port_details(port, network_id)
         networkInterface = client.NetworkInterfaces(**port_options)
         LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)s" % {
@@ -829,7 +832,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                             'ln': self._logicalNetworkID})
                 continue
             if agent['alive']:
-                instance_id = self._cached_ports_instance_ids.get(port["id"])
+                instance_id = self._cached_port_iids.get(port["id"])
                 port[portbindings.VIF_DETAILS].update(
                     {constants.HNV_PORT_PROFILE_ID: instance_id})
                 for segment in context.segments_to_bind:
