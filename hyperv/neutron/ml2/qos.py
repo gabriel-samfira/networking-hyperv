@@ -159,4 +159,4 @@ class HNVQosDriver(object):
         port_bindings = policy.get_bound_ports()
         for port_id in port_bindings:
             port = self._plugin.get_port(context, port_id)
-            self._driver.update_port(port, port)
+            self._driver.update_port(port, port["network_id"])

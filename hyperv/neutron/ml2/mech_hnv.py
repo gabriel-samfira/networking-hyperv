@@ -636,6 +636,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         state changes that it does not know or care about.
         """
         port = context.current
+        original_port = context.original
+        members = self._get_port_member_ips(port)
+        original_members = self._get_port_member_ips(original_port)
+        if members != original_members:
+            self._acl_driver.remove_member_from_sg(original_port)
+            self._acl_driver.add_member_to_sgs(port)
         network = context.network
         self.update_port(port, network.current["id"])
 
