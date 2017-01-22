@@ -364,7 +364,7 @@ class HNVAclDriver(object):
         member_ips = self._driver._get_port_member_ips(port)
         for i in rules:
             remote_sg = i.get("remote_group_id")
-            member_rules = self._get_member_rules(i, member_ips.get(remote_sg, []))
+            member_rules, priority = self._get_member_rules(i, member_ips.get(remote_sg, []))
             ret.extend(member_rules)
         return ret
 

@@ -245,11 +245,20 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._create_ports_in_nc(to_add)
         self._sync_ports(to_sync_db)
 
+    def _is_validate_db_port(self, port):
+        if self._qos_driver._is_network_device_port(port):
+            return False
+        if not port["device_owner"]:
+            return False
+        return True
+
     def _get_db_ports(self):
         admin_context = n_context.get_admin_context()
         db_ports = self._plugin.get_ports(admin_context)
         ports = {}
         for i in db_ports:
+            if not self._is_validate_db_port(i):
+                continue
             if not ports.get(i["id"]):
                 ports[i["id"]] = i
         return ports
@@ -670,7 +679,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         sg_ids = port.get("security_groups", [])
         acls = self._acl_driver._get_nc_acls(ids=sg_ids)
-        return (acls.values() if len(acl.values()) > 0 else None)
+        return (acls.values() if len(acls.values()) > 0 else None)
 
     def _get_ip_resource_id(self, ip, port_id):
         address = ip.get("ip_address")
@@ -689,7 +698,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         try:
            subnet_obj = self._vs_client.get(resource_id=subnet_id, parent_id=network_id)
            cache[subnet_cache_key] = subnet_obj 
-        except hnv_exception.NotFound:
+        except hnv_exception.NotFound as err:
             LOG.error("Failed to find subnet with ID %(subnet_id)s on network "
                     "%(network_id)s", 
                     {'subnet_id': subnet_id,
