@@ -218,10 +218,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 port, network)
         return
 
-    def _sync_ports(self, ports):
+    def _sync_db_ports(self, ports):
         if type(ports) is not list:
             ports = [ports,]
-        for i in ports:
+        for port in ports:
+            LOG.debug("Syncing port %r" % port)
             self.update_port(port, port["network_id"])
         return
 
@@ -239,11 +240,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         
         # to_remove = {k: nc_ports[k] for k in must_remove}
         to_add = [db_ports[k] for k in must_add]
-        to_sync_db = {k: db_ports[k] for k in must_sync}
+        to_sync_db = [db_ports[k] for k in must_sync]
 
         self._remove_nc_ports(must_remove)
         self._create_ports_in_nc(to_add)
-        self._sync_ports(to_sync_db)
+        self._sync_db_ports(to_sync_db)
 
     def _is_validate_db_port(self, port):
         if self._qos_driver._is_network_device_port(port):
@@ -679,7 +680,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         sg_ids = port.get("security_groups", [])
         acls = self._acl_driver._get_nc_acls(ids=sg_ids)
-        return (acls.values() if len(acls.values()) > 0 else None)
+        ret = []
+        for i in acls.keys():
+            ret.append(client.Resource(resource_ref=acls[i].resource_ref))
+        #TODO(gsamfira): Merge all acls into one huge ACL.
+        #aparently, HNV only supports one ACL per port......
+        return (ret[0] if len(ret) > 0 else None)
 
     def _get_ip_resource_id(self, ip, port_id):
         address = ip.get("ip_address")
@@ -796,11 +802,15 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def _bind_port_on_nc(self, port, network_id):
         port_options = self.get_port_details(port, network_id)
         networkInterface = client.NetworkInterfaces(**port_options)
-        LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)s" % {
+        LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)r" % {
             'port_id': port["id"],
-            'payload': json.dumps(networkInterface),
+            'payload': networkInterface,
             })
-        networkInterface = networkInterface.commit(wait=True)
+        try:
+            networkInterface = networkInterface.commit(wait=True)
+        except Exception as err:
+            LOG.debug("Got error %r" % err.response.content)
+            raise err
         return networkInterface.instance_id
 
     def get_agent_logical_network(self, agent):
