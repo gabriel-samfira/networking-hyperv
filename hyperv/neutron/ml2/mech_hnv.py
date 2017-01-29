@@ -63,10 +63,10 @@ class HNVWorker(worker.NeutronWorker):
 
     def start(self):
         super(HNVWorker, self).start()
-        # Sync ACLs in network controller
-        self._driver._acl_driver.sync_acls()
         # Sync networks
         self._driver._sync_networks()
+        # Sync ACLs in network controller
+        self._driver._acl_driver.sync_acls()
         # sync ports
         self._driver._sync_ports()
 
@@ -266,11 +266,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             filters={providernet.NETWORK_TYPE: self._supported_network_types})
         ret = {}
         for i in networks:
-            if len(i.get("subnets", [])) > 0:
-                subnets = self._plugin.get_subnets(
-                    admin_context,
-                    filters={"id": i["subnets"]})
-                i["subnets"] = subnets
             ret[i["id"]] = i
         return ret
 
@@ -288,13 +283,18 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             db_net = db_networks[net]
             nc_net = nc_networks[net]
             db_subnets = db_net["subnets"]
-            db_set = set([s["id"] for s in db_subnets])
-            nc_set = set([s.resource_id for s in nc_net.subnetworks])
+            db_set = set(db_subnets)
+            nc_subnet_list = nc_net.subnetworks or []
+            nc_subnets = {s["resourceId"]: s for s in nc_subnet_list}
+            nc_set = set(nc_subnets.keys())
             to_remove = list(nc_set - db_set)
             to_add = list(db_set - nc_set)
             for subnet in to_remove:
-                self._remove_subnet_from_virtual_network(net, subnet)
-            new_subnets = [sb for sb in db_subnets if sb["id"] in to_add]
+                self._remove_subnet_from_virtual_network(net, subnet, nc_subnets[subnet].address_prefix)
+            admin_context = n_context.get_admin_context()
+            new_subnets = self._plugin.get_subnets(
+                    admin_context,
+                    filters={"id": to_add})
             self._add_subnets_to_virtual_network(nc_net, new_subnets)
 
     #TODO(gsamfira): IMPLEMENT_ME
@@ -426,11 +426,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             LOG.debug("Creating virtual network %(network_id)s on network controller" % {
                 'network_id': virtualNetworkID,
                 })
-        admin_context = n_context.get_admin_context()
-        subnet_ids = network.get("subnets", [])
-        subnets = self._plugin.get_subnets(
-            admin_context,
-            filters={"id": subnet_ids})
+        subnet_ids = network.get("subnets")
+        subnets = None
+        if subnet_ids:
+            LOG.debug("Looking for subnets %r" % subnet_ids)
+            admin_context = n_context.get_admin_context()
+            subnets = self._plugin.get_subnets(
+                admin_context,
+                filters={"id": subnet_ids})
         ln_resource = client.Resource(resource_ref=self._ln.resource_ref)
         vn = client.VirtualNetworks(
                 tags={"provider": constants.HNV_PROVIDER_NAME},
@@ -438,7 +441,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 address_space=self._dummy_address_space,
                 logical_network=ln_resource).commit(wait=True)
 
-        if len(subnets) > 0:
+        if subnets:
             vn = self._add_subnets_to_virtual_network(vn, subnets)
         return vn
 
@@ -560,8 +563,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         dummy_prefix = self._dummy_address_space.address_prefixes[0]
         if dummy_prefix in network.address_space["addressPrefixes"]:
             network.address_space["addressPrefixes"].remove(dummy_prefix)
-
-        subnet_ids = [s.resource_id for s in networl.subnetworks]
+        n_subnets = network.subnetworks or []
+        subnet_ids = [s["resourceId"] for s in n_subnets]
         for subnet in subnets:
             if subnet["id"] in subnet_ids:
                 continue
@@ -659,14 +662,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             virtualNetwork.address_space["addressPrefixes"].append(dummy_prefix)
         virtualNetwork.commit()
         
-    def _remove_subnet_from_virtual_network(self, network_id, subnet_id):
+    def _remove_subnet_from_virtual_network(self, network_id, subnet_id, cidr):
         self._vs_client.remove(
             resource_id=subnet_id,
             parent_id=network_id,
             wait=True)
         self._remove_address_prefix_from_virtual_network(
             network_id,
-            exists.address_prefix)
+            cidr)
 
     def delete_subnet_postcommit(self, context):
         """Delete a subnet.
@@ -683,7 +686,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         subnet = context.current
         network_id = subnet["network_id"]
         subnet_id = subnet["id"]
-        self._remove_subnet_from_virtual_network(network_id, subnet_id)
+        cidr = subnet["cidr"]
+        self._remove_subnet_from_virtual_network(network_id, subnet_id, cidr)
 
     def create_port_precommit(self, context):
         self._insert_provisioning_block(context)
