@@ -176,7 +176,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             ports = [ports,]
         for i in ports:
             self._acl_driver.remove_member_from_sg(i)
-            self._remove_nc_port(i)
+            self._remove_nc_port(i["id"])
 
     def _get_port_member_ips(self, ports):
         # While this works well for ports that are still in neutron db,
@@ -246,7 +246,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         to_add = [db_ports[k] for k in must_add]
         to_sync_db = [db_ports[k] for k in must_sync]
 
-        self._remove_nc_ports(must_remove)
+        for port_id in must_remove:
+            self._remove_nc_port(port_id)
         self._create_ports_in_nc(to_add)
         self._sync_db_ports(to_sync_db)
 
@@ -710,9 +711,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     'network': network.current["id"],
                     }
                 )
-        instance_ids = self._create_ports_in_nc(port)
-        self._cached_port_iids[port["id"]] = instance_ids[port["id"]]
-
+        self._create_ports_in_nc(port)
 
     def update_port_precommit(self, context):
         if context.host == context.original_host:
