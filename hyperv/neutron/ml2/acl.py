@@ -125,7 +125,9 @@ class HNVAclDriver(object):
         # we are syncing and we want to overwrite any existing rule.
         # removing the etag will ensure we will not get a 412 error
         # in case the resource changed in the meantime.
-        acl.etag = None
+        default_rules = self._get_drop_all_rules()
+        rules.extend(default_rules)
+        #acl.etag = None
         acl.acl_rules = rules
         acl.commit()
 

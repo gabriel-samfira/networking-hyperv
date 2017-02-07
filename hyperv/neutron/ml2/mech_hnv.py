@@ -117,7 +117,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # Initialize the ACL client
         self._acl_client = client.AccessControlLists()
         # Initialize virtualSubnet client
-        self._vs_client = client.SubNetwork()
+        self._vs_client = client.SubNetworks()
         #Initialize VirtualNetworks cloent
         self._vn_client = client.VirtualNetworks()
         # Get logical network for overlay network encapsulation
@@ -177,7 +177,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             ports = [ports,]
         for i in ports:
             self._acl_driver.remove_member_from_sg(i)
-            self._remove_nc_port(i)
+            self._remove_nc_port(i["id"])
 
     def _get_port_member_ips(self, ports):
         # While this works well for ports that are still in neutron db,
@@ -246,7 +246,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         to_add = [db_ports[k] for k in must_add]
         to_sync_db = [db_ports[k] for k in must_sync]
 
-        self._remove_nc_ports(must_remove)
+        for port_id in must_remove:
+            self._remove_nc_port(port_id)
         self._create_ports_in_nc(to_add)
         self._sync_db_ports(to_sync_db)
 
@@ -285,7 +286,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             db_subnets = db_net["subnets"]
             db_set = set(db_subnets)
             nc_subnet_list = nc_net.subnetworks or []
-            nc_subnets = {s["resourceId"]: s for s in nc_subnet_list}
+            nc_subnets = {s.resource_id: s for s in nc_subnet_list}
             nc_set = set(nc_subnets.keys())
             to_remove = list(nc_set - db_set)
             to_add = list(db_set - nc_set)
@@ -553,7 +554,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cidr = subnet["cidr"]
         _id = subnet["id"]
         network_id = subnet["network_id"]
-        return client.SubNetwork(
+        return client.SubNetworks(
             parent_id=network_id,
             resource_id=_id,
             address_prefix=cidr)
@@ -567,10 +568,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             subnets = [subnets,]
 
         dummy_prefix = self._dummy_address_space.address_prefixes[0]
-        if dummy_prefix in network.address_space["addressPrefixes"]:
+        if dummy_prefix in network.address_space.get("addressPrefixes", []):
             network.address_space["addressPrefixes"].remove(dummy_prefix)
         n_subnets = network.subnetworks or []
-        subnet_ids = [s["resourceId"] for s in n_subnets]
+        subnet_ids = [s.resource_id for s in n_subnets]
         for subnet in subnets:
             if subnet["id"] in subnet_ids:
                 continue
@@ -738,9 +739,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     'network': network.current["id"],
                     }
                 )
-        instance_ids = self._create_ports_in_nc(port)
-        self._cached_port_iids[port["id"]] = instance_ids[port["id"]]
-
+        self._create_ports_in_nc(port)
 
     def update_port_precommit(self, context):
         if context.host == context.original_host:
