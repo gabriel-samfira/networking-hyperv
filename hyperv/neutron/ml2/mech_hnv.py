@@ -32,6 +32,7 @@ from neutron_lib.plugins import directory
 from neutron.plugins.ml2 import driver_api
 from neutron.plugins.common import constants as plugin_const
 from neutron.extensions import portbindings
+from neutron.extensions.external_net import EXTERNAL
 from neutron.db import provisioning_blocks
 from neutron.db import segments_db
 from neutron.extensions import providernet
@@ -40,15 +41,15 @@ from neutron import context as n_context
 from neutron import worker
 
 from hyperv.common.i18n import _, _LE, _LI  # noqa
-from hnv_client import client
+from hnv import client
 from hyperv.common.utils import retry_on_http_error
 from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
 from hyperv.neutron.ml2 import qos
 from hyperv.neutron.ml2 import acl as hnv_acl
 
-from hnv_client import config as hnv_config
-from hnv_client.common import exception as hnv_exception
+from hnv import config as hnv_config
+from hnv.common import exception as hnv_exception
 
 from neutron.common import config
 
@@ -221,7 +222,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             self._acl_driver.add_member_to_sgs(port)
             self._cached_port_iids[port["id"]] = self._bind_port_on_nc(
                 port, network)
-        return
 
     def _sync_db_ports(self, ports):
         if type(ports) is not list:
@@ -313,7 +313,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
         self._remove_nc_networks(must_remove)
         for net in new_db_nets:
-            self._create_network_on_nc(net)
+            self._create_virtual_network_on_nc(net)
         self._sync_subnets(must_sync, db_networks, nc_networks)
 
     def _is_valid_db_port(self, port):
@@ -417,7 +417,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             raise n_exc.InvalidInput(error_message=msg)
         return ln
 
-    def _create_network_on_nc(self, network):
+    def _create_virtual_network_on_nc(self, network):
         virtualNetworkID = network["id"]
         try:
             vn = self._vn_client.get(resource_id=virtualNetworkID)
@@ -457,7 +457,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cause the deletion of the resource.
         """
         network = context.current
-        self._create_network_on_nc(network)
+        if network.get(EXTERNAL) is False:
+            self._create_virtual_network_on_nc(network)
+        else:
+            LOG.debug("Defering creation of external network. HNV cannot create a "
+                "VIP logical network without a subnet. A corresponding network "
+                "will be created when a subnet is associated in neutron")
+            # self._create_vip_logical_network(network)
 
     def update_network_precommit(self, context):
         """Update resources of a network.
@@ -579,6 +585,20 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         network = network.commit(wait=True)
         return network
 
+    def _add_subnets_to_logical_network(self, network, subnets):
+        if subnets is None:
+            # curse you python and your loose typing
+            # TODO(gsamfira): Should we throw here?
+            LOG.debug("No subnets to work with.")
+            return
+        if type(subnets) is not list:
+            subnets = [subnets,]
+        try:
+            nc_logicalnet = client.LogicalNetworks.get(resource_id=network["id"])
+        except hyperv_exc.NotFound:
+            LOG.debug("Creating logical network %s" % network["id"])
+        return
+
     def create_subnet_postcommit(self, context):
         """Create a subnet.
 
@@ -591,12 +611,20 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cause the deletion of the resource.
         """
         subnet = context.current
-        # HNV does not allow setting the gateway IP. It automatically allocates
-        # the lowest IP address from a subnet as a router IP which gets configured
-        # on the distributed router configured by HNV.
-        network_id = subnet["network_id"]
-        virtualNetwork = client.VirtualNetworks.get(resource_id=network_id)
-        self._add_subnets_to_virtual_network(virtualNetwork, subnet)
+        network = context.network.current
+        if network.get(EXTERNAL):
+            # as opposed to virtual networks, logical networks (which we use for)
+            # floating ips (VIP in HNV) does allow setting both gateways and allocation
+            # pools.
+            self._add_subnets_to_logical_network(network, subnet)
+        else:
+            # HNV does not allow setting the gateway IP for virtual networks.
+            # It automatically allocates the lowest IP address from a subnet
+            # as a router IP which gets configured on the distributed router
+            # configured by HNV.
+            network_id = subnet["network_id"]
+            virtualNetwork = client.VirtualNetworks.get(resource_id=network_id)
+            self._add_subnets_to_virtual_network(virtualNetwork, subnet)
 
     def update_subnet_precommit(self, context):
         """Update resources of a subnet.

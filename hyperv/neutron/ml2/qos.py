@@ -12,7 +12,7 @@
 
 from oslo_log import log as logging
 
-from hnv_client import client
+from hnv import client
 
 from neutron_lib import constants
 
