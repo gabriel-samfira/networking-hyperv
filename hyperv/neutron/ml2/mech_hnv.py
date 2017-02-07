@@ -40,15 +40,15 @@ from neutron import context as n_context
 from neutron import worker
 
 from hyperv.common.i18n import _, _LE, _LI  # noqa
-from hnv_client import client
+from hnv import client
 from hyperv.common.utils import retry_on_http_error
 from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
 from hyperv.neutron.ml2 import qos
 from hyperv.neutron.ml2 import acl as hnv_acl
 
-from hnv_client import config as hnv_config
-from hnv_client.common import exception as hnv_exception
+from hnv import config as hnv_config
+from hnv.common import exception as hnv_exception
 
 from neutron.common import config
 
@@ -116,7 +116,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # Initialize the ACL client
         self._acl_client = client.AccessControlLists()
         # Initialize virtualSubnet client
-        self._vs_client = client.SubNetwork()
+        self._vs_client = client.SubNetworks()
         #Initialize VirtualNetworks cloent
         self._vn_client = client.VirtualNetworks()
         # Get logical network for overlay network encapsulation
@@ -286,7 +286,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             db_subnets = db_net["subnets"]
             db_set = set(db_subnets)
             nc_subnet_list = nc_net.subnetworks or []
-            nc_subnets = {s["resourceId"]: s for s in nc_subnet_list}
+            nc_subnets = {s.resource_id: s for s in nc_subnet_list}
             nc_set = set(nc_subnets.keys())
             to_remove = list(nc_set - db_set)
             to_add = list(db_set - nc_set)
@@ -419,6 +419,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return ln
 
     def _create_network_on_nc(self, network):
+        LOG.debug("New network details: %r" % network)
         virtualNetworkID = network["id"]
         try:
             vn = self._vn_client.get(resource_id=virtualNetworkID)
@@ -548,7 +549,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cidr = subnet["cidr"]
         _id = subnet["id"]
         network_id = subnet["network_id"]
-        return client.SubNetwork(
+        return client.SubNetworks(
             parent_id=network_id,
             resource_id=_id,
             address_prefix=cidr)
@@ -562,10 +563,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             subnets = [subnets,]
 
         dummy_prefix = self._dummy_address_space.address_prefixes[0]
-        if dummy_prefix in network.address_space["addressPrefixes"]:
+        if dummy_prefix in network.address_space.get("addressPrefixes", []):
             network.address_space["addressPrefixes"].remove(dummy_prefix)
         n_subnets = network.subnetworks or []
-        subnet_ids = [s["resourceId"] for s in n_subnets]
+        subnet_ids = [s.resource_id for s in n_subnets]
         for subnet in subnets:
             if subnet["id"] in subnet_ids:
                 continue
@@ -592,6 +593,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cause the deletion of the resource.
         """
         subnet = context.current
+        network = context.network.current
+        LOG.debug("Adding subnet to network: %r" % network)
         # HNV does not allow setting the gateway IP. It automatically allocates
         # the lowest IP address from a subnet as a router IP which gets configured
         # on the distributed router configured by HNV.

@@ -17,14 +17,14 @@ import netaddr
 # from oslo_config import cfg
 from neutron import context as n_context
 from neutron.callbacks import events
-from hnv_client import client
+from hnv import client
 from requests.status_codes import codes
 from hyperv.common.utils import retry_on_http_error
 from oslo_log import log
 from hyperv.neutron import constants
 
 
-from hnv_client.common import exception as hnv_exception
+from hnv.common import exception as hnv_exception
 
 # CONF = cfg.CONF
 
@@ -127,7 +127,7 @@ class HNVAclDriver(object):
         # in case the resource changed in the meantime.
         default_rules = self._get_drop_all_rules()
         rules.extend(default_rules)
-        acl.etag = None
+        #acl.etag = None
         acl.acl_rules = rules
         acl.commit()
 
