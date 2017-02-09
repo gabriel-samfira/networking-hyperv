@@ -15,6 +15,7 @@
 import json
 import requests
 import netaddr
+import hashlib
 
 from requests.status_codes import codes
 
@@ -31,6 +32,7 @@ from neutron_lib.plugins import directory
 
 from neutron.plugins.ml2 import driver_api
 from neutron.plugins.common import constants as plugin_const
+from neutron.services.segments import db as segment_service_db
 from neutron.extensions import portbindings
 from neutron.extensions.external_net import EXTERNAL
 from neutron.db import provisioning_blocks
@@ -129,7 +131,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # first subnet.
         self._dummy_address_space = client.AddressSpace(address_prefixes=["1.0.0.0/32"])
         self.agent_type = constants.AGENT_TYPE_HNV
-        self._supported_network_types = [plugin_const.TYPE_VXLAN,]
+        self._supported_tenant_network_types = [plugin_const.TYPE_VXLAN,]
+        self._supported_external_network_types = [
+            plugin_const.TYPE_VLAN,
+            plugin_const.TYPE_FLAT,]
+        self._supported_network_types = self._supported_tenant_network_types + self._supported_external_network_types
         self._setup_vif_port_bindings()
         self._qos_driver_property = None
         self._acl_driver_property = None
@@ -251,7 +257,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._create_ports_in_nc(to_add)
         self._sync_db_ports(to_sync_db)
 
-    def _get_nc_networks(self):
+    def _get_nc_virtual_networks(self):
         networks = client.VirtualNetworks.get()
         ret = {}
         for net in networks:
@@ -298,12 +304,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     filters={"id": to_add})
             self._add_subnets_to_virtual_network(nc_net, new_subnets)
 
-    #TODO(gsamfira): IMPLEMENT_ME
     def _sync_networks(self):
-        nc_networks = self._get_nc_networks()
+        nc_virtual_networks = self._get_nc_virtual_networks()
         db_networks = self._get_db_networks()
 
-        nc_set = set(nc_networks.keys())
+        nc_set = set(nc_virtual_networks.keys())
         db_set = set(db_networks.keys())
 
         must_remove = list(nc_set - db_set)
@@ -315,24 +320,27 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._remove_nc_networks(must_remove)
         for net in new_db_nets:
             self._create_virtual_network_on_nc(net)
-        self._sync_subnets(must_sync, db_networks, nc_networks)
-
-    def _is_valid_db_port(self, port):
-        if self._qos_driver._is_network_device_port(port):
-            return False
-        if not port["device_owner"]:
-            return False
-        return True
+        self._sync_subnets(must_sync, db_networks, nc_virtual_networks)
 
     def _get_db_ports(self):
         admin_context = n_context.get_admin_context()
         db_ports = self._plugin.get_ports(admin_context)
-        ports = {}
+        ports = {
+            "external": {},
+            "compute": {},
+        }
         for i in db_ports:
-            if not self._is_valid_db_port(i):
+            owner = i.get("device_owner")
+            if not owner:
                 continue
-            if not ports.get(i["id"]):
-                ports[i["id"]] = i
+            if owner == constants.DEVICE_OWNER_ROUTER_GW:
+                section = "external"
+            elif owner.startswith(constants.DEVICE_OWNER_COMPUTE_PREFIX):
+                section = "compute"
+            else:
+                continue
+            if not ports[section].get(i["id"]):
+                ports[section][i["id"]] = i
         return ports
 
     def _get_nc_ports(self):
@@ -359,8 +367,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # network controller API. We will need to retrieve the instance_id
         self.vif_details = {}
 
-    def _check_supported_network_type(self, net_type):
-        return net_type in self._supported_network_types
+    def _check_supported_network_type(self, net_type, external=False):
+        supported = self._supported_tenant_network_types
+        if external:
+            supported = self._supported_external_network_types
+        return net_type in supported
 
     def _insert_provisioning_block(self, context):
         # we insert a status barrier to prevent the port from transitioning
@@ -380,18 +391,16 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 context._plugin_context, port['id'], resources.PORT,
                 provisioning_blocks.L2_AGENT_ENTITY)
 
-    def _validate_segments(self, segment):
+    def _validate_segments(self, network, segment):
         network_type = segment['network_type']
         # TODO(gsamfira): So far I have found no way to get or set
         # this via API calls. The only way I managed to get the allocated
         # segmentation ID was by 
         segmentation_id = segment['segmentation_id']
         LOG.debug('Validating network segment with '
-                      'type %(network_type)s, '
-                      'segmentation ID %(segmentation_id)s.' %
-                      {'network_type': network_type,
-                       'segmentation_id': segmentation_id})
-        if not self._check_supported_network_type(network_type):
+                      'type %(network_type)s, ' %
+                      {'network_type': network_type})
+        if not self._check_supported_network_type(network_type, external=network.get(EXTERNAL)):
             msg = _('Network type %s is not supported') % network_type
             raise n_exc.InvalidInput(error_message=msg)
 
@@ -406,9 +415,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         cannot block.  Raising an exception will result in a rollback
         of the current transaction.
         """
+        network = context.current
         segments = context.network_segments
         for segment in segments:
-            self._validate_segments(segment)
+            self._validate_segments(network, segment)
 
     def _get_logical_network(self, network):
         ln = self._ln_client.get(resource_id=self._logicalNetworkID)
@@ -568,8 +578,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             subnets = [subnets,]
 
         dummy_prefix = self._dummy_address_space.address_prefixes[0]
-        if dummy_prefix in network.address_space.get("addressPrefixes", []):
-            network.address_space["addressPrefixes"].remove(dummy_prefix)
+        if network.address_space.address_prefixes is None:
+            network.address_space.address_prefixes = []
+        if dummy_prefix in network.address_space.address_prefixes:
+            network.address_space.address_prefixes.remove(dummy_prefix)
         n_subnets = network.subnetworks or []
         subnet_ids = [s.resource_id for s in n_subnets]
         for subnet in subnets:
@@ -577,14 +589,18 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 continue
             subnet_resource = self._get_subnet_resource(subnet)
             cidr = subnet_resource.address_prefix
-            if cidr not in network.address_space["addressPrefixes"]:
-                network.address_space["addressPrefixes"].append(cidr)
+            if cidr not in network.address_space.address_prefixes:
+                network.address_space.address_prefixes.append(cidr)
             if network.subnetworks is None:
                 network.subnetworks = [subnet_resource,]
             else:
                 network.subnetworks.append(subnet_resource)
         network = network.commit(wait=True)
         return network
+
+    def _get_ip_pool_id(self, net_id, subnet_id):
+        joined = "%s%s" % (net_id, subnet_id)
+        return hashlib.md5(joined).hexdigest
 
     def _add_subnets_to_logical_network(self, network, subnets):
         if subnets is None:
@@ -598,7 +614,41 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             nc_logicalnet = client.LogicalNetworks.get(resource_id=network["id"])
         except hyperv_exc.NotFound:
             LOG.debug("Creating logical network %s" % network["id"])
-        return
+            nc_logicalnet = client.LogicalNetworks(
+                resource_id=network["id"],
+                network_virtualization_enabled=True).commit(wait=True)
+        net_type = network.get(providernet.NETWORK_TYPE)
+        if net_type == constants.TYPE_FLAT:
+            vlan_id = 0
+        elif net_type == constants.TYPE_VLAN:
+            vlan_id = network.get(providernet.SEGMENTATION_ID)
+        for i in subnets:
+            dns_nameservers = i.get("dns_nameservers", [])
+            startIp = None
+            endIp = None
+            allocation_pool = i.get("allocation_pools")
+            if allocation_pool:
+                allocation_pool = allocation_pool[0]
+                startIp = allocation_pool.get("start")
+                endIp = allocation_pool.get("end")
+            gateway = i.get("gateway_ip")
+            subnet_id = i["id"]
+            prefix = i["cidr"]
+            pool_id = self._get_ip_pool_id(network["id"], subnet_id)
+            subnet = client.LogicalSubnetworks(
+                resource_id=subnet_id,
+                parent_id=network["id"],
+                address_prefix=prefix,
+                vlan_id=vlan_id,
+                dns_servers=dns_nameservers,
+                is_public=True,
+                default_gateways=[gateway,]).commit(wait=True)
+            ip_pool = client.IPPools(
+                resource_id=pool_id,
+                parent_id=subnet.resource_id,
+                grandparent_id=nc_logicalnet.resource_id,
+                start_ip_address=startIp,
+                end_ip_address=endIp).commit(wait=True)
 
     def create_subnet_postcommit(self, context):
         """Create a subnet.
@@ -614,9 +664,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         subnet = context.current
         network = context.network.current
         if network.get(EXTERNAL):
-            # as opposed to virtual networks, logical networks (which we use for)
+            # as opposed to virtual networks, logical networks, which we use for
             # floating ips (VIP in HNV) does allow setting both gateways and allocation
-            # pools.
+            # pools. They are also of type VLAN. If no VLAN tag is required, the value
+            # should be set to 0, essentially turning it into a flat network 
             self._add_subnets_to_logical_network(network, subnet)
         else:
             # HNV does not allow setting the gateway IP for virtual networks.
@@ -684,11 +735,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         except hnv_exception.NotFound:
             return
         dummy_prefix = self._dummy_address_space.address_prefixes[0]
-        if cidr in virtualNetwork.address_space["addressPrefixes"]:
-            virtualNetwork.address_space["addressPrefixes"].remove(cidr)
+        if cidr in virtualNetwork.address_space.address_prefixes:
+            virtualNetwork.address_space.address_prefixes.remove(cidr)
         # address space cannot be null or empty
-        if len(virtualNetwork.address_space["addressPrefixes"]) == 0:
-            virtualNetwork.address_space["addressPrefixes"].append(dummy_prefix)
+        if len(virtualNetwork.address_space.address_prefixes) == 0:
+            virtualNetwork.address_space.address_prefixes.append(dummy_prefix)
         virtualNetwork.commit()
         
     def _remove_subnet_from_virtual_network(self, network_id, subnet_id, cidr):
@@ -719,7 +770,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._remove_subnet_from_virtual_network(network_id, subnet_id, cidr)
 
     def create_port_precommit(self, context):
-        self._insert_provisioning_block(context)
+        port = context.current
+        owner = port.get("device_owner")
+        if owner.startswith(constants.DEVICE_OWNER_COMPUTE_PREFIX):
+            self._insert_provisioning_block(context)
 
     def create_port_postcommit(self, context):
         """Create a port.
@@ -968,7 +1022,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 port[portbindings.VIF_DETAILS].update(
                     {constants.HNV_PORT_PROFILE_ID: instance_id})
                 for segment in context.segments_to_bind:
-                    if self._check_supported_network_type(segment["network_type"]):
+                    if self._check_supported_network_type(segment["network_type"], external=False):
                         context.set_binding(segment[driver_api.ID],
                                 self.vif_type,
                                 {constants.HNV_PORT_PROFILE_ID: instance_id})
@@ -988,3 +1042,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         # this worker simply does a one-off sync of the NB API of the
         # Network Controller with what neutron has in its database
         return (HNVWorker(self),)
+
+    def check_segment_for_agent(self, segment, agent):
+        # HNV only supports one VMswitch with VFP enabled. There is no way we can
+        # have multiple vmswitches enabled on the same host at the same time, so there is
+        # no real reason to care about physnet mappings
+        return True 
