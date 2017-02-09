@@ -224,10 +224,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if type(ports) is not list:
             ports = [ports,]
         for port in ports:
-            network = port.get("network_id")
-            self._acl_driver.add_member_to_sgs(port)
-            self._cached_port_iids[port["id"]] = self._bind_port_on_nc(
-                port, network)
+            owner = port.get("device_owner")
+            if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
+                network = port.get("network_id")
+                self._acl_driver.add_member_to_sgs(port)
+                self._cached_port_iids[port["id"]] = self._bind_port_on_nc(
+                    port, network)
 
     def _sync_db_ports(self, ports):
         if type(ports) is not list:
@@ -362,6 +364,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         for net in new_ln_nets:
             self._create_logical_network_on_nc(net)
         self._sync_virtual_subnets(sync_vr, db_networks["compute"], nc_virtual_networks)
+        #TODO (gsamfira): sync logical subnets
 
     def _get_db_ports(self):
         admin_context = n_context.get_admin_context()
@@ -834,7 +837,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def create_port_precommit(self, context):
         port = context.current
         owner = port.get("device_owner")
-        if owner.startswith(constants.DEVICE_OWNER_COMPUTE_PREFIX):
+        if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
             self._insert_provisioning_block(context)
 
     def create_port_postcommit(self, context):
@@ -849,13 +852,15 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         network = context.network
-        LOG.debug(
-                "Creating port %(port)s bound to network %(network)s" % {
-                    'port': port["id"],
-                    'network': network.current["id"],
-                    }
-                )
-        self._create_ports_in_nc(port)
+        owner = port.get("device_owner")
+        if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
+            LOG.debug(
+                    "Creating port %(port)s bound to network %(network)s" % {
+                        'port': port["id"],
+                        'network': network.current["id"],
+                        }
+                    )
+            self._create_ports_in_nc(port)
 
     def update_port_precommit(self, context):
         if context.host == context.original_host:
@@ -1067,6 +1072,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                        'at': self.agent_type,
                        'network': context.network.current['id'],
                        'host': context.host})
+            return
         for agent in agents:
             LOG.debug("Checking agent: %s", agent)
             agent_ln = self.get_agent_logical_network(agent)
