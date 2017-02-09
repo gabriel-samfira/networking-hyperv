@@ -134,7 +134,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._supported_tenant_network_types = [plugin_const.TYPE_VXLAN,]
         self._supported_external_network_types = [
             plugin_const.TYPE_VLAN,
-            plugin_const.TYPE_FLAT,]
+            plugin_const.TYPE_FLAT]
         self._supported_network_types = self._supported_tenant_network_types + self._supported_external_network_types
         self._setup_vif_port_bindings()
         self._qos_driver_property = None
@@ -237,20 +237,29 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             self.update_port(port, port["network_id"])
         return
 
+    # TODO:
+    # create onat rule for network:router_gateway port
+    # sync router ports
+    # create floating ips
+    # sync logical networks and subnets
+    # create combined ACLs
+    # get all networks attached to a router
+    # for each virtual network attached to the router, get all
+    # network interfaces and apply outbound nat rules if a gateway is set
     def _sync_ports(self):
         nc_ports = self._get_nc_ports()
         db_ports = self._get_db_ports()
 
         nc_set = set(nc_ports.keys())
-        db_set = set(db_ports.keys())
+        db_set = set(db_ports["compute"].keys())
 
         must_remove = list(nc_set - db_set)
         must_add = list(db_set - nc_set)
         must_sync = list(db_set & nc_set)
         
         # to_remove = {k: nc_ports[k] for k in must_remove}
-        to_add = [db_ports[k] for k in must_add]
-        to_sync_db = [db_ports[k] for k in must_sync]
+        to_add = [db_ports["compute"][k] for k in must_add]
+        to_sync_db = [db_ports["compute"][k] for k in must_sync]
 
         for port_id in must_remove:
             self._remove_nc_port(port_id)
@@ -266,26 +275,52 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             ret[net.resource_id] = net
         return ret
 
+    def _get_nc_logical_networks(self):
+        networks = client.LogicalNetworks.get()
+        ret = {}
+        for net in networks:
+            if not net.tags or net.tags.get("provider") != constants.HNV_PROVIDER_NAME:
+                continue
+            ret[net.resource_id] = net
+        return ret
+
     def _get_db_networks(self):
         admin_context = n_context.get_admin_context()
         networks = self._plugin.get_networks(
             admin_context,
             filters={providernet.NETWORK_TYPE: self._supported_network_types})
-        ret = {}
+        ret = {
+            "external": {},
+            "compute": {},
+        }
         for i in networks:
-            ret[i["id"]] = i
+            if i.get(EXTERNAL):
+                    if i[providernet.NETWORK_TYPE] in self._supported_external_network_types:
+                    ret["external"][i["id"]] = i
+            else:
+                if i[providernet.NETWORK_TYPE] in self._supported_tenant_network_types:
+                    ret["compute"][i["id"]] = i
         return ret
 
-    def _remove_nc_netowrk(self, network_id):
+    def _remove_nc_virtual_netowrk(self, network_id):
         self._vn_client.remove(resource_id=network_id)
 
-    def _remove_nc_networks(self, network_ids):
+    def _remove_nc_logical_network(self, network_id):
+        client.LogicalNetworks.remove(resource_id=network_id)
+
+    def _remove_nc_virtual_networks(self, network_ids):
         if type(network_ids) is not list:
             network_ids = [network_ids]
         for i in network_ids:
-            self._remove_nc_netowrk(i)
+            self._remove_nc_virtual_netowrk(i)
 
-    def _sync_subnets(self, sync_list, db_networks, nc_networks):
+    def _remove_nc_logical_networks(self, network_ids):
+        if type(network_ids) is not list:
+            network_ids = [network_ids,]
+        for i in network_ids:
+            self._remove_nc_logical_network(i)
+
+    def _sync_virtual_subnets(self, sync_list, db_networks, nc_networks):
         for net in sync_list:
             db_net = db_networks[net]
             nc_net = nc_networks[net]
@@ -306,21 +341,27 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
     def _sync_networks(self):
         nc_virtual_networks = self._get_nc_virtual_networks()
+        nc_logical_networks = self._get_nc_logical_networks()
         db_networks = self._get_db_networks()
 
-        nc_set = set(nc_virtual_networks.keys())
-        db_set = set(db_networks.keys())
+        add_vr, remove_vr, sync_vr = utils.diff_dictionary_keys(
+            nc_virtual_networks,
+            db_networks["compute"])
 
-        must_remove = list(nc_set - db_set)
-        must_add = list(db_set - nc_set)
-        must_sync = list(db_set & nc_set)
+        add_ln, remove_ln, sync_ln = utils.diff_dictionary_keys(
+            nc_logical_networks,
+            db_networks["external"])
 
-        new_db_nets = [db_networks[net] for net in must_add]
+        new_vr_nets = [db_networks["compute"][net] for net in add_vr]
+        new_ln_nets = [db_networks["external"][net] for net in add_ln]
 
-        self._remove_nc_networks(must_remove)
-        for net in new_db_nets:
+        self._remove_nc_virtual_networks(remove_vr)
+        self._remove_nc_logical_networks(remove_ln)
+        for net in new_vr_nets:
             self._create_virtual_network_on_nc(net)
-        self._sync_subnets(must_sync, db_networks, nc_virtual_networks)
+        for net in new_ln_nets:
+            self._create_logical_network_on_nc(net)
+        self._sync_virtual_subnets(sync_vr, db_networks["compute"], nc_virtual_networks)
 
     def _get_db_ports(self):
         admin_context = n_context.get_admin_context()
@@ -333,9 +374,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             owner = i.get("device_owner")
             if not owner:
                 continue
-            if owner == constants.DEVICE_OWNER_ROUTER_GW:
+            if owner == const.DEVICE_OWNER_ROUTER_GW:
                 section = "external"
-            elif owner.startswith(constants.DEVICE_OWNER_COMPUTE_PREFIX):
+            elif owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
                 section = "compute"
             else:
                 continue
@@ -428,6 +469,40 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             raise n_exc.InvalidInput(error_message=msg)
         return ln
 
+    def _get_network_subnets(self, network):
+        subnet_ids = network.get("subnets")
+        subnets = None
+        if subnet_ids:
+            LOG.debug("Looking for subnets %r" % subnet_ids)
+            admin_context = n_context.get_admin_context()
+            subnets = self._plugin.get_subnets(
+                admin_context,
+                filters={"id": subnet_ids})
+        return subnets
+
+    def _create_logical_network_on_nc(self, network):
+        subnets = self._get_network_subnets(network)
+        net_type = network.get(providernet.NETWORK_TYPE)
+        tags = {
+            "provider": constants.HNV_PROVIDER_NAME,
+            "net_type": net_type,
+        }
+        if net_type == constants.TYPE_FLAT:
+            tags["vlan_id"] = 0
+        elif net_type == plugin_const.TYPE_VLAN:
+            tags["vlan_id"] = network.get(providernet.SEGMENTATION_ID)
+        try:
+            nc_logicalnet = client.LogicalNetworks.get(resource_id=network["id"])
+        except hyperv_exc.NotFound:
+            LOG.debug("Creating logical network %s" % network["id"])
+            nc_logicalnet = client.LogicalNetworks(
+                tags=tags,
+                resource_id=network["id"],
+                network_virtualization_enabled=True).commit(wait=True)
+        if subnets:
+            nc_logicalnet = self._add_subnets_to_logical_network(nc_logicalnet, subnets)
+        return nc_logicalnet
+
     def _create_virtual_network_on_nc(self, network):
         virtualNetworkID = network["id"]
         try:
@@ -437,14 +512,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             LOG.debug("Creating virtual network %(network_id)s on network controller" % {
                 'network_id': virtualNetworkID,
                 })
-        subnet_ids = network.get("subnets")
-        subnets = None
-        if subnet_ids:
-            LOG.debug("Looking for subnets %r" % subnet_ids)
-            admin_context = n_context.get_admin_context()
-            subnets = self._plugin.get_subnets(
-                admin_context,
-                filters={"id": subnet_ids})
+        subnets = self._get_network_subnets(network)
         ln_resource = client.Resource(resource_ref=self._ln.resource_ref)
         vn = client.VirtualNetworks(
                 tags={"provider": constants.HNV_PROVIDER_NAME},
@@ -471,10 +539,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if network.get(EXTERNAL) is False:
             self._create_virtual_network_on_nc(network)
         else:
-            LOG.debug("Defering creation of external network. HNV cannot create a "
-                "VIP logical network without a subnet. A corresponding network "
-                "will be created when a subnet is associated in neutron")
-            # self._create_vip_logical_network(network)
+            self._create_logical_network_on_nc(network)
 
     def update_network_precommit(self, context):
         """Update resources of a network.
@@ -544,7 +609,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         deleted.
         """
         network = context.current
-        self._remove_nc_netowrk(network['id'])
+        if network.get(EXTERNAL):
+            self._remove_nc_logical_network(network["id"])
+        else:
+            self._remove_nc_virtual_netowrk(network['id'])
 
     def create_subnet_precommit(self, context):
         """Allocate resources for a new subnet.
@@ -610,18 +678,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             return
         if type(subnets) is not list:
             subnets = [subnets,]
-        try:
-            nc_logicalnet = client.LogicalNetworks.get(resource_id=network["id"])
-        except hyperv_exc.NotFound:
-            LOG.debug("Creating logical network %s" % network["id"])
-            nc_logicalnet = client.LogicalNetworks(
-                resource_id=network["id"],
-                network_virtualization_enabled=True).commit(wait=True)
-        net_type = network.get(providernet.NETWORK_TYPE)
-        if net_type == constants.TYPE_FLAT:
-            vlan_id = 0
-        elif net_type == constants.TYPE_VLAN:
-            vlan_id = network.get(providernet.SEGMENTATION_ID)
+
         for i in subnets:
             dns_nameservers = i.get("dns_nameservers", [])
             startIp = None
@@ -634,21 +691,25 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             gateway = i.get("gateway_ip")
             subnet_id = i["id"]
             prefix = i["cidr"]
-            pool_id = self._get_ip_pool_id(network["id"], subnet_id)
+            pool_id = self._get_ip_pool_id(network.resource_id, subnet_id)
             subnet = client.LogicalSubnetworks(
+                tags={"provider": constants.HNV_PROVIDER_NAME},
                 resource_id=subnet_id,
-                parent_id=network["id"],
+                parent_id=network.resource_id,
                 address_prefix=prefix,
-                vlan_id=vlan_id,
+                vlan_id=network.tags["vlan_id"],
                 dns_servers=dns_nameservers,
                 is_public=True,
                 default_gateways=[gateway,]).commit(wait=True)
             ip_pool = client.IPPools(
+                tags={"provider": constants.HNV_PROVIDER_NAME},
                 resource_id=pool_id,
                 parent_id=subnet.resource_id,
                 grandparent_id=nc_logicalnet.resource_id,
                 start_ip_address=startIp,
                 end_ip_address=endIp).commit(wait=True)
+        network = client.LogicalNetworks.get(resource_id=network.resource_id)
+        return network
 
     def create_subnet_postcommit(self, context):
         """Create a subnet.
@@ -667,8 +728,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             # as opposed to virtual networks, logical networks, which we use for
             # floating ips (VIP in HNV) does allow setting both gateways and allocation
             # pools. They are also of type VLAN. If no VLAN tag is required, the value
-            # should be set to 0, essentially turning it into a flat network 
-            self._add_subnets_to_logical_network(network, subnet)
+            # should be set to 0, essentially turning it into a flat network
+            ln = client.LogicalNetworks.get(resource_id=network["id"])
+            self._add_subnets_to_logical_network(ln, subnet)
         else:
             # HNV does not allow setting the gateway IP for virtual networks.
             # It automatically allocates the lowest IP address from a subnet

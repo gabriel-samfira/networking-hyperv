@@ -22,3 +22,13 @@ def retry_on_http_error(code, tries=5):
             return f(*args, **kwargs)
         return f_retry
     return deco_retry
+
+def diff_dictionary_keys(first, second):
+    first_set = set(first.keys())
+    second_set = set(second.keys())
+
+    remove = list(first_set - second_set)
+    add = list(second_set - first_set)
+    sync = list(second_set & first_set)
+
+    return (add, remove, sync)
