@@ -892,6 +892,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                         }
                     )
             self._create_ports_in_nc(port)
+        else:
+            LOG.debug("Creating port %r" % port)
 
     def update_port_precommit(self, context):
         if context.host == context.original_host:
@@ -991,11 +993,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             #TODO(gsamfira): Notify neutron L2 agent of the new instance ID
             #for this port, as that needs to be set on the VM switch port
             #for the network controller to be able to control it
-            instance_ids = self._create_ports_in_nc(port)
-            instance_id = instance_ids[port["id"]]
-            port[portbindings.VIF_DETAILS].update(
-                {constants.HNV_PORT_PROFILE_ID: instance_id})
-            return instance_id
+            self._create_ports_in_nc(port)
+            instance_id = self._cached_port_iids.get(port["id"])
+            if instance_id:
+                port[portbindings.VIF_DETAILS].update(
+                    {constants.HNV_PORT_PROFILE_ID: instance_id})
+            return
         port_details = self.get_port_details(port, network_id)
         nc_port.update(port_details)
         nc_port.commit(wait=True)
