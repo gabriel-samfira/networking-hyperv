@@ -49,7 +49,7 @@ from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
 from hyperv.neutron.ml2 import qos
 from hyperv.neutron.ml2 import acl as hnv_acl
-from hyperv.neutron.ml2 import acl as l3
+from hyperv.neutron.ml2 import l3
 from hyperv.common import utils
 
 from hnv import config as hnv_config
