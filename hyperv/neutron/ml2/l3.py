@@ -1,12 +1,19 @@
 import netaddr
 
+from oslo_log import log
+
 from neutron_lib import constants as const
 
 from hnv import client
 from hnv.common import exception as hnv_exception
 from hyperv.neutron import constants
+from hyperv.common.i18n import _, _LE, _LI
 
-from networking_ovn.common import extensions
+from neutron_lib.plugins import directory
+
+from neutron.plugins.common import constants as n_const
+from neutron import context as n_context
+
 from neutron.services import service_base
 from neutron.db import common_db_mixin
 from neutron.db import extraroute_db
@@ -21,56 +28,6 @@ def get_manager(port):
     elif owner == const.DEVICE_OWNER_FLOATINGIP:
         return PublicIPAddressManager()
     return None
-
-
-class HNVL3RouterPlugin(service_base.ServicePluginBase,
-                        common_db_mixin.CommonDbMixin,
-                        extraroute_db.ExtraRoute_dbonly_mixin,
-                        HNVMixin):
-
-    supported_extension_aliases = 'router'
-    
-    def __init__(self):
-        LOG.info(_LI("Starting HNVL3RouterPlugin"))
-        super(HNVL3RouterPlugin, self).__init__()
-
-    def add_router_interface(self, context, router_id, interface_info):
-        router_interface_info = \
-            super(OVNL3RouterPlugin, self).add_router_interface(
-                context, router_id, interface_info)
-
-        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
-        LOG.debug("INTERFACE info: %r" % router_interface_info)
-        # port = self._plugin.get_port(context, router_interface_info['port_id'])
-        # if (len(router_interface_info['subnet_ids']) == 1 and
-        #         len(port['fixed_ips']) > 1):
-        #     # NOTE(lizk) It's adding a subnet onto an already existing router
-        #     # interface port, try to update lrouter port 'networks' column.
-        #     self.update_lrouter_port_in_ovn(context, router_id, port)
-        # else:
-        #     self.create_lrouter_port_in_ovn(context, router_id, port)
-        return router_interface_info
-
-    def remove_router_interface(self, context, router_id, interface_info):
-        router_interface_info = \
-            super(OVNL3RouterPlugin, self).remove_router_interface(
-                context, router_id, interface_info)
-
-        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
-        LOG.debug("INTERFACE info: %r" % router_interface_info)
-        # port_id = router_interface_info['port_id']
-        # try:
-        #     port = self._plugin.get_port(context, port_id)
-        #     # The router interface port still exists, call ovn to update it.
-        #     self.update_lrouter_port_in_ovn(context, router_id, port)
-        # except n_exc.PortNotFound:
-        #     # The router interface port doesn't exist any more, call ovn to
-        #     # delete it.
-        #     self._ovn.delete_lrouter_port(utils.ovn_lrouter_port_name(port_id),
-        #                                   utils.ovn_name(router_id),
-        #                                   if_exists=False
-        #                                   ).execute(check_error=True)
-        return router_interface_info
 
 
 class HNVMixin(object):
@@ -98,11 +55,73 @@ class HNVMixin(object):
                     subnet_id)
         subnet = client.LogicalSubnetworks.get(
             parent_id=subnet["network_id"],
-            resource_id=logical_subnet)
+            resource_id=subnet_id)
         net = netaddr.IPNetwork(subnet.address_prefix)
         if ip["ip_address"] in net:
             return subnet
         return None
+
+
+class HNVL3RouterPlugin(service_base.ServicePluginBase,
+                        common_db_mixin.CommonDbMixin,
+                        extraroute_db.ExtraRoute_dbonly_mixin,
+                        HNVMixin):
+
+    supported_extension_aliases = [
+            'router',
+            'extraroute']
+
+    def __init__(self):
+        LOG.info(_LI("Starting HNVL3RouterPlugin"))
+        super(HNVL3RouterPlugin, self).__init__()
+
+    def get_plugin_type(self):
+        return n_const.L3_ROUTER_NAT
+
+    def get_plugin_description(self):
+        """returns string description of the plugin."""
+        return ("L3 Router Service Plugin for basic L3 forwarding"
+                " using HNV") 
+
+    def add_router_interface(self, context, router_id, interface_info):
+        router_interface_info = \
+            super(HNVL3RouterPlugin, self).add_router_interface(
+                context, router_id, interface_info)
+
+        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
+        LOG.debug("INTERFACE info: %r" % router_interface_info)
+        # port = self._plugin.get_port(context, router_interface_info['port_id'])
+        # if (len(router_interface_info['subnet_ids']) == 1 and
+        #         len(port['fixed_ips']) > 1):
+        #     # NOTE(lizk) It's adding a subnet onto an already existing router
+        #     # interface port, try to update lrouter port 'networks' column.
+        #     self.update_lrouter_port_in_ovn(context, router_id, port)
+        # else:
+        #     self.create_lrouter_port_in_ovn(context, router_id, port)
+        return router_interface_info
+
+    def remove_router_interface(self, context, router_id, interface_info):
+        router_interface_info = \
+            super(HNVL3RouterPlugin, self).remove_router_interface(
+                context, router_id, interface_info)
+
+        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
+        LOG.debug("INTERFACE info: %r" % router_interface_info)
+        # port_id = router_interface_info['port_id']
+        # try:
+        #     port = self._plugin.get_port(context, port_id)
+        #     # The router interface port still exists, call ovn to update it.
+        #     self.update_lrouter_port_in_ovn(context, router_id, port)
+        # except n_exc.PortNotFound:
+        #     # The router interface port doesn't exist any more, call ovn to
+        #     # delete it.
+        #     self._ovn.delete_lrouter_port(utils.ovn_lrouter_port_name(port_id),
+        #                                   utils.ovn_name(router_id),
+        #                                   if_exists=False
+        #                                   ).execute(check_error=True)
+        return router_interface_info
+
+
         
 
 class LoadBalancerManager(HNVMixin):
@@ -130,16 +149,17 @@ class LoadBalancerManager(HNVMixin):
             "onat-id": onat_id,
         }
 
-    def _get_frontend_ip_configurations(self, ips, load_balancer):
+    def _get_frontend_ip_configurations(self, ips, lb, resource_ids):
         ret = []
-        lb = load_balancer
         for ip in ips:
-            frontend_id = "fe-%s" % ip["ip_address"]
+            frontend_id = "%s-%s" % (resource_ids["fe-id"], ip["ip_address"])
             ip_subnet = self._get_lnsubnet_for_ip(ip)
             if not ip_subnet:
                 raise Exception("Failed to find subnet for ip %(ip)s in "
                     "network controller" % {
                         "ip": ip["ip_address"]})
+            load_balancer = client.LoadBalancers.get(resource_id=lb.resource_id)
+            LOG.debug("LB is: %r" % load_balancer.dump())
             #TODO: Consider using wait=False wherever possible.
             fe = client.FrontendIPConfigurations(
                 tags={"provider": constants.HNV_PROVIDER_NAME},
@@ -147,17 +167,19 @@ class LoadBalancerManager(HNVMixin):
                 resource_id=frontend_id,
                 subnet=ip_subnet,
                 private_ip_address=ip["ip_address"],
-                private_ip_allocation_method="Static").commit(wait=True)
-            ret.append(fe.resource_ref)
+                private_ip_allocation_method="Static")
+            LOG.debug("Creating FRONTEND IP config: %r" % fe.dump())
+            fe = fe.commit(wait=True)
+            ret.append(client.Resource(resource_ref=fe.resource_ref))
         return ret
 
     def _create_load_balancer(self, port):
         resource_ids = self._get_resource_ids(port)
         try:
-            lb = client.LoadBalancers.get(resource_id["lb-id"])
+            lb = client.LoadBalancers.get(resource_ids["lb-id"])
             return lb
         except hnv_exception.NotFound:
-            LOG.debug("Creating new load balancer %s" % resource_id["lb-id"])
+            LOG.debug("Creating new load balancer %s" % resource_ids["lb-id"])
 
         fixed_ips = port.get("fixed_ips")
         if not fixed_ips:
@@ -166,20 +188,24 @@ class LoadBalancerManager(HNVMixin):
         lb = client.LoadBalancers(
             tags={"provider": constants.HNV_PROVIDER_NAME},
             resource_id=resource_ids["lb-id"]).commit(wait=True)
-        fe_ips = cls._get_frontend_ip_configurations(fixed_ips, lb)
+        LOG.debug("Created load balancer: %r" % lb.dump())
+        fe_ips = self._get_frontend_ip_configurations(fixed_ips, lb, resource_ids)
         if len(fe_ips) == 0:
             raise Exception("Failed to get frontend IP configurations")
         be = client.BackendAddressPools(
             tags={"provider": constants.HNV_PROVIDER_NAME},
             parent_id=lb.resource_id,
             resource_id=resource_ids["be-id"]).commit(wait=True)
+        be_resource = client.Resource(resource_ref=be.resource_ref)
         onat = client.OutboundNATRules(
             tags={"provider": constants.HNV_PROVIDER_NAME},
             resource_id=resource_ids["onat-id"],
             parent_id=lb.resource_id,
             frontend_ip_configurations=fe_ips,
-            backend_address_pool=be.resource_ref,
-            protocol="All").commit(wait=True)
+            backend_address_pool=be_resource,
+            protocol="All")
+        LOG.debug("ONAT rule: %r" % onat.dump())
+        onat.commit(wait=True)
         return client.LoadBalancers.get(resource_id=lb.resource_id)
 
     def _remove_load_balancer(self, port):

@@ -896,7 +896,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             self._create_ports_in_nc(port)
         else:
             LOG.debug("Creating port %r" % port)
-            managet = l3.get_manager(port)
+            manager = l3.get_manager(port)
             if manager:
                 manager.create(port)
 
@@ -963,7 +963,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         owner = port.get("device_owner")
-        if owner.startswith(DEVICE_OWNER_COMPUTE_PREFIX):
+        if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
             self._remove_nc_ports(port)
         else:
             manager = l3.get_manager(port)
