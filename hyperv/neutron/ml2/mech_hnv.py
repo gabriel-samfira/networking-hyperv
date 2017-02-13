@@ -49,6 +49,7 @@ from hyperv.neutron import exception as hyperv_exc
 from hyperv.neutron import constants
 from hyperv.neutron.ml2 import qos
 from hyperv.neutron.ml2 import acl as hnv_acl
+from hyperv.neutron.ml2 import acl as l3
 from hyperv.common import utils
 
 from hnv import config as hnv_config
@@ -117,7 +118,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._plugin_property = None
         # Get logical network for overlay network encapsulation
         self._logicalNetworkID = cfg.CONF.HNV.logical_network
-        self._ln = self._get_logical_network(self._logicalNetworkID) 
+        self._ln = self._get_logical_network(self._logicalNetworkID)
+        self._public_ips = l3.PublicIPAddressManager()
         # addressSpace is a mandatory parameter when creating a virtual network
         # in the HNV network controller. We add a bogus address space when we
         # create the initial virtual network. This gets removed when we add our
@@ -894,6 +896,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             self._create_ports_in_nc(port)
         else:
             LOG.debug("Creating port %r" % port)
+            managet = l3.get_manager(port)
+            if manager:
+                manager.create(port)
 
     def update_port_precommit(self, context):
         if context.host == context.original_host:
@@ -918,13 +923,31 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         original_port = context.original
-        members = self._get_port_member_ips(port)
-        original_members = self._get_port_member_ips(original_port)
-        if members != original_members:
-            self._acl_driver.remove_member_from_sg(original_port)
-            self._acl_driver.add_member_to_sgs(port)
         network = context.network
-        self.update_port(port, network.current["id"])
+        owner = port.get("device_owner")
+        LOG.debug("ORIGINAL port: %r" % original_port)
+        LOG.debug("NEW port: %r" % port)
+        if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX): 
+            members = self._get_port_member_ips(port)
+            original_members = self._get_port_member_ips(original_port)
+            if members != original_members:
+                self._acl_driver.remove_member_from_sg(original_port)
+                self._acl_driver.add_member_to_sgs(port)
+            self.update_port(port, network.current["id"])
+        elif owner == const.DEVICE_OWNER_FLOATINGIP:
+            # In the case of floating IPs we care about device_id. That will
+            # be the resource_id of the PublicIPAddress
+            # Neutron first calls create_port to create the router port. After the
+            # port is created, a floating IP object is added to the database. An update
+            # is called on the router to set the device_id. Given that update is called
+            # immediately after create, it's safe to create the actual PublicIPAddress
+            # at this stage. It would have been preferred to implement create_floating_ip
+            # in the L3 service plugin, but there is no way to also associate the floating IP to
+            # a private IP during the create phase (create and associate).
+            # The associate action done during create is emitted as a notify.
+            # is where we do the actual associate.
+            self._public_ips.create(port)
+
 
     def delete_port_postcommit(self, context):
         """Delete a port.
@@ -939,7 +962,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         deleted.
         """
         port = context.current
-        self._remove_nc_ports(port)
+        owner = port.get("device_owner")
+        if owner.startswith(DEVICE_OWNER_COMPUTE_PREFIX):
+            self._remove_nc_ports(port)
+        else:
+            manager = l3.get_manager(port)
+            if manager:
+                manager.remove(port)
 
     def _get_port_acl(self, port):
         """
@@ -960,6 +989,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             raise ValueError("Invalid fixed_ips object")
         return "%s_%s" % (port_id, address)
 
+    # TODO: remove id from cache on remove
     def _get_subnet_from_cache(self, subnet_id, network_id, cache):
         # you can have the same subnet ID on different virtual networks
         subnet_cache_key = "%s-%s" % (network_id, subnet_id)
@@ -1004,7 +1034,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         nc_port.commit(wait=True)
         return nc_port.instance_id
 
-    # TODO(gsamfira): IMPLEMENT_ME
     def _confirm_ip_in_subnet(self, ip, subnet):
         network = netaddr.IPNetwork(subnet)
         return (ip in network)
@@ -1084,20 +1113,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def get_agent_logical_network(self, agent):
         return agent['configurations'].get('logical_network', None)
 
-    def bind_port(self, context):
+    def _bind_agent_port(self, context):
         port = context.current
         network = context.network
 
-        LOG.debug("Attempting to bind port %(port)s on "
-                  "network %(network)s",
-                  {'port': context.current['id'],
-                   'network': context.network.current['id']})
-        vnic_type = context.current.get(portbindings.VNIC_TYPE,
-                                        portbindings.VNIC_NORMAL)
-        if vnic_type not in self.supported_vnic_types:
-            LOG.debug("Refusing to bind due to unsupported vnic_type: %s",
-                      vnic_type)
-            return
         agents = context.host_agents(self.agent_type)
         if not agents:
             LOG.debug("Port %(pid)s on network %(network)s not bound, "
@@ -1134,6 +1153,41 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 LOG.warning(_LW("Refusing to bind port %(pid)s to dead agent: "
                                 "%(agent)s"),
                             {'pid': context.current['id'], 'agent': agent})
+
+    def bind_port(self, context):
+        port = context.current
+        network = context.network
+
+        LOG.debug("Attempting to bind port %(port)s on "
+                  "network %(network)s",
+                  {'port': context.current['id'],
+                   'network': context.network.current['id']})
+        vnic_type = context.current.get(portbindings.VNIC_TYPE,
+                                        portbindings.VNIC_NORMAL)
+        if vnic_type not in self.supported_vnic_types:
+            LOG.debug("Refusing to bind due to unsupported vnic_type: %s",
+                      vnic_type)
+            return
+
+        owner = port.get("device_owner")
+        if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
+            return self._bind_agent_port(context)
+        
+        if owner in const.DEVICE_OWNER_ROUTER_GW:
+            for segment in context.segments_to_bind:
+                if self._check_supported_network_type(segment["network_type"], external=True):
+                    context.set_binding(segment[driver_api.ID],
+                            self.vif_type, {})
+                    LOG.debug("Bound using segment: %s", segment)
+                    return
+        elif owner == const.DEVICE_OWNER_FLOATINGIP:
+            for segment in context.segments_to_bind:
+                context.set_binding(segment[driver_api.ID],
+                        self.vif_type, {})
+                LOG.debug("Bound using segment: %s", segment)
+                return
+
+        
 
     def get_workers(self):
         """Get any NeutronWorker instances that should have their own process
