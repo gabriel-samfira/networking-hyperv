@@ -29,7 +29,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                         HNVMixin):
 
     supported_extension_aliases = 'router'
-    
+
     def __init__(self):
         LOG.info(_LI("Starting HNVL3RouterPlugin"))
         super(HNVL3RouterPlugin, self).__init__()
