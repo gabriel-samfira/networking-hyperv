@@ -353,21 +353,18 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         self.subscribe()
 
     def subscribe(self):
+        # Removing a router gateway will delete the coresponding load balancer
+        # which in turn will cascade and remove the load balancer from all interfaces
+        # that had it configured
         registry.subscribe(self.process_floating_ip_update,
                            resources.FLOATING_IP,
                            events.AFTER_UPDATE)
         registry.subscribe(self.process_set_gw_event,
                            resources.FLOATING_IP,
                            events.AFTER_CREATE)
-        registry.subscribe(self.process_delete_gw_event,
-                           resources.ROUTER_GATEWAY,
-                           events.AFTER_DELETE)
 
     def process_set_gw_event(self, resource, event, trigger, **kwargs):
-        LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
-
-    def process_delete_gw_event(self, resource, event, trigger, **kwargs):
-        LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
+        LOG.debug("GW DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
 
     def process_floating_ip_update(self, resource, event, trigger, **kwargs):
         LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
@@ -379,20 +376,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         """returns string description of the plugin."""
         return ("L3 Router Service Plugin for basic L3 forwarding"
                 " using HNV") 
-
-"""
-{
-  "network_id": "1f3fd5fa-7ed3-44f2-bb19-2ba5894cd963", 
-  "tenant_id": "694672dafd7f4b99a5591d3cc534a311", 
-  "subnet_id": "9d443ffe-efb1-48dc-9adc-eedb7bad7d5d", 
-  "subnet_ids": [
-    "9d443ffe-efb1-48dc-9adc-eedb7bad7d5d"
-  ], 
-  "port_id": "9cc33bd8-2fd2-4cb8-9ba7-d059bb6de298", 
-  "id": "4e8ae013-4abe-4aa7-b729-7f37a4e3391b"
-}
-
-"""
 
     def _get_ip_configurations_for_subnet(self, interface_info):
         ret = []
@@ -432,10 +415,11 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         lb = self._get_lb_for_router(router_id)
         if not lb:
             return
-        for ip in ip_configs:
+        for cfg in ip_configs:
             # for some reason, the IPConfiguration resource does not allow
             # PUT operations. We have to get the NetworkInterface object
             # and update that.
+            ip = cfg.get_resource()
             net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
             for idx, i in enumerate(net_iface.ip_configurations):
                 if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
@@ -465,10 +449,11 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         lb = self._get_lb_for_router(router_id)
         if not lb:
             return
-        for ip in ip_configs:
+        for cfg in ip_configs:
             # for some reason, the IPConfiguration resource does not allow
             # PUT operations. We have to get the NetworkInterface object
             # and update that.
+            ip = cfg.get_resource()
             net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
             for idx, i in enumerate(net_iface.ip_configurations):
                 if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
