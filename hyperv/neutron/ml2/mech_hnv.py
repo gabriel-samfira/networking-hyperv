@@ -701,8 +701,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if type(subnets) is not list:
             subnets = [subnets,]
 
-        # there can be only one
-        lb_manager = client.LoadBalancerManager.get()[0]
+        lb_manager = client.LoadBalancerManager.get()
         network_subnets = [i.resource_id for i in network.subnetworks]
         ip_pools = [j.resource_id for i in network.subnetworks if i.ip_pools for j in i.ip_pools]
         for i in subnets:
