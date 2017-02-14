@@ -365,12 +365,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         registry.subscribe(self.process_floating_ip_update,
                            resources.FLOATING_IP,
                            events.AFTER_UPDATE)
-        registry.subscribe(self.process_set_gw_event,
-                           resources.FLOATING_IP,
-                           events.AFTER_CREATE)
-
-    def process_set_gw_event(self, resource, event, trigger, **kwargs):
-        LOG.debug("GW DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
 
     def process_floating_ip_update(self, resource, event, trigger, **kwargs):
         LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
@@ -395,8 +389,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                     ret.append(ip_conf)
         return ret
 
-    def _get_lb_for_router(self, router_id):
-        router = self.get_router(self._admin_context, router_id)
+    def _get_lb_for_router(self, router):
         ext_port_id = router.get("gw_port_id")
         if not ext_port_id:
             LOG.debug("Router %s has no external network set. Nothing to do here" % router_id)
@@ -409,6 +402,124 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
             return
         return lb
 
+    def _get_lb_for_router_by_id(self, router_id):
+        router = self.get_router(self._admin_context, router_id)
+        return self._get_lb_for_router(router)
+
+    def _get_attached_router_interfaces(self, context, router_id):
+        filters = dict(
+                device_id=[router_id],
+                device_owner=[const.DEVICE_OWNER_ROUTER_INTF])
+        ports = self._plugin.get_ports(context, filters=filters)
+        return ports
+
+    def _get_virtual_networks(self, ids):
+        vn = client.VirtualNetworks.get()
+        return [i for i in vn if i.resource_id in ids]
+
+    def _get_network_interfaces(self, ids):
+        net = client.NetworkInterfaces.get()
+        return {i.resource_id: i for i in net if i.resource_id in ids}
+
+    def _get_subnet_info_from_interface(self, interface):
+        net_id = interface["network_id"]
+        ret = []
+        fixed_ips = interface.get("fixed_ips", [])
+        for i in fixed_ips:
+            tmp = {
+                'network_id': net_id,
+                'subnet_id': i["subnet_id"]
+            } 
+            if tmp in ret:
+                continue
+            ret.append(tmp)
+        return ret
+
+    def _get_connected_interfaces(self, subnets):
+        ip_configurations = []
+        net_ids = [i["network_id"] for i in subnets]
+        virt_nets = self._get_virtual_networks(net_ids)
+        for net in virt_nets:
+            for sub in net.subnetworks:
+                details = {
+                    "network_id": sub.parent_id,
+                    "subnet_id": sub.resource_id
+                }
+                if details in subnets:
+                    for ip in sub.ip_configuration:
+                        ip_configurations.append(ip.get_resource())
+        # Unfortunately, calling PUT on an IP resource is not allowed (for some reason). To update the
+        # NAT load balancer, we need to update the IP configuration as part of the network interface
+        # and call PUT on the network interface itself
+        net_iface_ids = [i.parent_id for i in ip_configurations]
+        net_ifaces = self._get_network_interfaces(net_iface_ids)
+        ret = {}
+        for i in ip_configurations:
+            if not ret.get(i.parent_id):
+                ret[i.parent_id] = {
+                    "iface": net_ifaces[i.parent_id],
+                    "ip_configs": []}
+            ret[i.parent_id]["ip_configs"].append(i.resource_id)
+        return ret
+
+    def _apply_lb_on_connected_networks(self, router_interfaces, lb):
+        subnets = []
+        for i in router_interfaces:
+            info = self._get_subnet_info_from_interface(i)
+            for j in info:
+                if j in subnets:
+                    continue
+                subnets.append(j)
+        net_ifaces = self._get_connected_interfaces(subnets)
+        be_resource = client.Resource(
+                resource_ref=lb.backend_address_pools[0].resource_ref)
+        for i in net_ifaces:
+            iface = net_ifaces[i]["iface"]
+            for idx, ip in enumerate(iface.ip_configurations):
+                if ip.resource_id in net_ifaces[i]["ip_configs"]:
+                    iface.ip_configurations[idx].backend_address_pools.append(be_resource)
+            iface.commit(wait=True)
+
+    #def _clear_lb_from_connected_networks(self, router_interfaces, lb):
+    #    subnets = []
+    #    for i in router_interfaces:
+    #        info = self._get_subnet_info_from_interface(i)
+    #        for j in info:
+    #            if j in subnets:
+    #                continue
+    #            subnets.append(j)
+    #    net_ifaces = self._get_connected_interfaces(subnets)
+    #    be_resource = lb.backend_address_pools[0].resource_ref
+    #    for i in net_ifaces:
+    #        iface = net_ifaces[i]["iface"]
+    #        for idx, ip in enumerate(iface.ip_configurations):
+    #            if ip.resource_id in net_ifaces[i]["ip_configs"]:
+    #                new_be = []
+    #                for backend in iface.ip_configurations[idx].backend_address_pools:
+    #                    if backend.resource_ref == be_resource:
+    #                        continue
+    #                    new_be.append(backend)
+    #                iface.ip_configurations[idx].backend_address_pools = new_be
+    #        iface.commit(wait=True)
+
+    def update_router(self, context, id, router):
+        original_router = self.get_router(context, id)
+        lb = None
+        original_gw = original_router.get("gw_port_id")
+        if original_gw:
+            lb = self._get_lb_for_router(original_router)
+
+        updated = super(HNVL3RouterPlugin, self).update_router(context, id, router)
+        external_port = updated.get("gw_port_id")
+        if external_port == original_gw:
+            return updated
+        router_id = updated["id"]
+        if external_port:
+            router_interfaces = self._get_attached_router_interfaces(context, router_id)
+            lb = self._get_lb_for_router(updated)
+            self._apply_lb_on_connected_networks(router_interfaces, lb)
+        return updated
+
     def add_router_interface(self, context, router_id, interface_info):
         router_interface_info = \
             super(HNVL3RouterPlugin, self).add_router_interface(
@@ -419,7 +530,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
             LOG.debug("No IP configurations found for any "
                 "of the subnets configured on %s" % router_interface_info["network_id"])
 
-        lb = self._get_lb_for_router(router_id)
+        lb = self._get_lb_for_router_by_id(router_id)
         if not lb:
             return
         for cfg in ip_configs:
@@ -454,7 +565,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
             LOG.debug("No IP configurations found for any "
                 "of the subnets configured on %s" % router_interface_info["network_id"])
 
-        lb = self._get_lb_for_router(router_id)
+        lb = self._get_lb_for_router_by_id(router_id)
         if not lb:
             return
         for cfg in ip_configs:

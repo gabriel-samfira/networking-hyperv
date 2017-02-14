@@ -390,6 +390,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         ports = {
             "external": {},
             "compute": {},
+            "other": {},
         }
         for i in db_ports:
             owner = i.get("device_owner")
@@ -400,9 +401,10 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             elif owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
                 section = "compute"
             else:
-                continue
+                section = "other"
             if not ports[section].get(i["id"]):
                 ports[section][i["id"]] = i
+        LOG.debug("FOUND DB ports: %r" % ports)
         return ports
 
     def _get_nc_ports(self):
@@ -1207,7 +1209,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                             self.vif_type, {})
                     LOG.debug("Bound using segment: %s", segment)
                     return
-        elif owner == const.DEVICE_OWNER_FLOATINGIP:
+        elif owner in (const.DEVICE_OWNER_FLOATINGIP, const.DEVICE_OWNER_ROUTER_INTF):
             for segment in context.segments_to_bind:
                 context.set_binding(segment[driver_api.ID],
                         self.vif_type, {})
