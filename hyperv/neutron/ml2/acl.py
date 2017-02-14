@@ -338,6 +338,7 @@ class HNVAclDriver(object):
 
         security_group_id = rule["security_group_id"]
         rule_id = rule["id"]
+        LOG.debug("CREATING ACL RULE with: %r --> %r -->%r -->%r -->%r -->%r -->%r -->%r -->%r -->%r -->%r" % (security_group_id, rule_id, protocol, direction, source_port_range, source_prefix, destination_port_range, destination_prefix, ACL_PROP_MAP["action"]["allow"], description, priority))
         rule = client.ACLRules(
             parent_id=security_group_id,
             resource_id=rule_id,
@@ -396,6 +397,7 @@ class HNVAclDriver(object):
             LOG.debug("Getting ACL rule for %(remote_ip)s with protocol %(protocol)s" % {
                 'remote_ip': tmp_rule["remote_ip_prefix"],
                 'protocol': tmp_rule["protocol"]})
+            LOG.debug("RULE INFO: %r" % tmp_rule)
             r = self._get_acl_rule(tmp_rule, priority=priority)
             if r is None:
                 continue
