@@ -290,7 +290,7 @@ class PublicIPAddressManager(HNVMixin):
                 "%(network_interface)s" % {
                 'dip': dip,
                 'network_interface': net_adapter_id})
-        return net_adapter.commit(wait=true)
+        return net_adapter.commit(wait=True)
 
     def _disassociate_public_ip(self, assoc_data):
         vip_address = assoc_data["floating_ip_address"]
@@ -298,9 +298,17 @@ class PublicIPAddressManager(HNVMixin):
         vip_obj = self._get_and_validate_vip(vip_address, vip_id)
         if not vip_obj.ip_configuration:
             return
-        ip_config = vip_obj.ip_configuration.get_resource()
-        ip_config.public_ip = None
-        ip_config.commit(wait=True)
+
+        ip = vip_obj.ip_configuration.get_resource()
+        net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
+        for idx, i in enumerate(net_iface.ip_configurations):
+            if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
+                resource = vip_obj.ip_configuration
+                pub_ip = net_iface.ip_configurations[idx].public_ip_address
+                if pub_ip:
+                    net_iface.ip_configurations[idx].public_ip_address = None
+                break
+        net_iface.commit(wait=True)
 
     @classmethod
     def update_vip_association(cls, assoc_data):
