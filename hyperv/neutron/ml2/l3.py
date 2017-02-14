@@ -548,7 +548,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                     else:
                         net_iface.ip_configurations[idx].backend_address_pools = [resource,]
                     break
-            LOG.debug("NET_IFACE: %r" % net_iface.dump())
             net_iface.commit(wait=True)
         return router_interface_info
 
@@ -556,9 +555,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         router_interface_info = \
             super(HNVL3RouterPlugin, self).remove_router_interface(
                 context, router_id, interface_info)
-
-        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
-        LOG.debug("INTERFACE info: %r" % router_interface_info)
 
         ip_configs = self._get_ip_configurations_for_subnet(router_interface_info)
         if len(ip_configs) == 0:
@@ -579,12 +575,15 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                     resource = client.Resource(
                         resource_ref=lb.backend_address_pools[0].resource_ref)
                     backend_pool = net_iface.ip_configurations[idx].backend_address_pools
-#                    LOG.debug("backend_pool: %r --> ip_cfg: %r --> resource: %r" % (backend_pool, ip.dump(), resource.dump()))
-                    if backend_pool and resource.dump() in backend_pool:
-                        net_iface.ip_configurations[idx].backend_address_pools.remove(resource.dump())
-                    if len(net_iface.ip_configurations[idx].backend_address_pools) == 0:
-                        net_iface.ip_configurations[idx].backend_address_pools = None
+                    ids = [i.resource_ref for i in backend_pool] 
+                    new = []
+                    for backend in backend_pool:
+                        if resource.resource_ref in ids:
+                            continue
+                        new.append(backend)
+                    net_iface.ip_configurations[idx].backend_address_pools = new
                     break
             LOG.debug("NET_IFACE: %r" % net_iface.dump())
             net_iface.commit(wait=True)
         return router_interface_info
+
