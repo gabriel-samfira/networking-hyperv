@@ -153,6 +153,10 @@ class LoadBalancerManager(HNVMixin):
         resource_ids = self._get_resource_ids(port)
         client.LoadBalancers.remove(resource_id=resource_ids["lb-id"])
 
+    def _get_load_balancer(self, port):
+        resource_ids = self._get_resource_ids(port)
+        return client.LoadBalancers.get(resource_id=resource_ids["lb-id"])
+
     @classmethod
     def create(cls, port):
         obj = cls()
@@ -162,6 +166,11 @@ class LoadBalancerManager(HNVMixin):
     def remove(cls, port):
         obj = cls()
         return obj._remove_load_balancer(port)
+
+    @classmethod
+    def get(cls, port):
+        obj = cls()
+        return obj._get_load_balancer(port)
 
 """
 {
@@ -340,12 +349,25 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         LOG.info(_LI("Starting HNVL3RouterPlugin"))
         super(HNVL3RouterPlugin, self).__init__()
         self._public_ip = PublicIPAddressManager()
+        self._lb = LoadBalancerManager()
         self.subscribe()
 
     def subscribe(self):
-        registry.subscribe(self.process_sg_notification,
+        registry.subscribe(self.process_floating_ip_update,
                            resources.FLOATING_IP,
                            events.AFTER_UPDATE)
+        registry.subscribe(self.process_set_gw_event,
+                           resources.FLOATING_IP,
+                           events.AFTER_CREATE)
+        registry.subscribe(self.process_delete_gw_event,
+                           resources.ROUTER_GATEWAY,
+                           events.AFTER_DELETE)
+
+    def process_set_gw_event(self, resource, event, trigger, **kwargs):
+        LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
+
+    def process_delete_gw_event(self, resource, event, trigger, **kwargs):
+        LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
 
     def process_floating_ip_update(self, resource, event, trigger, **kwargs):
         LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
@@ -358,21 +380,73 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         return ("L3 Router Service Plugin for basic L3 forwarding"
                 " using HNV") 
 
+"""
+{
+  "network_id": "1f3fd5fa-7ed3-44f2-bb19-2ba5894cd963", 
+  "tenant_id": "694672dafd7f4b99a5591d3cc534a311", 
+  "subnet_id": "9d443ffe-efb1-48dc-9adc-eedb7bad7d5d", 
+  "subnet_ids": [
+    "9d443ffe-efb1-48dc-9adc-eedb7bad7d5d"
+  ], 
+  "port_id": "9cc33bd8-2fd2-4cb8-9ba7-d059bb6de298", 
+  "id": "4e8ae013-4abe-4aa7-b729-7f37a4e3391b"
+}
+
+"""
+
+    def _get_ip_configurations_for_subnet(self, interface_info):
+        ret = []
+        net_id = interface_info["network_id"]
+        subnet_ids = interface_info.get("subnet_ids", [])
+        for i in subnet_ids:
+            nc_subnet = client.SubNetworks.get(parent_id=net_id, resource_id=i)
+            if nc_subnet.ip_configuration:
+                for ip_conf in nc_subnet.ip_configuration:
+                    ret.append(ip_conf)
+        return ret
+
+    def _get_lb_for_router(self, router_id):
+        router = self._plugin.get_router(self._admin_context, router_id)
+        ext_port_id = router.get("gw_port_id")
+        if not ext_port_id:
+            LOG.debug("Router %s has no external network set. Nothing to do here" % router_id)
+            return
+
+        ext_port = self._plugin.get_port(self._admin_context, ext_port_id)
+        lb = self._lb.get(ext_port)
+        if not lb.backend_address_pools:
+            LOG.debug("There are no backend address pools defined on %s" % lb.resource_id)
+            return
+        return lb
+
     def add_router_interface(self, context, router_id, interface_info):
         router_interface_info = \
             super(HNVL3RouterPlugin, self).add_router_interface(
                 context, router_id, interface_info)
 
-        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
-        LOG.debug("INTERFACE info: %r" % router_interface_info)
-        # port = self._plugin.get_port(context, router_interface_info['port_id'])
-        # if (len(router_interface_info['subnet_ids']) == 1 and
-        #         len(port['fixed_ips']) > 1):
-        #     # NOTE(lizk) It's adding a subnet onto an already existing router
-        #     # interface port, try to update lrouter port 'networks' column.
-        #     self.update_lrouter_port_in_ovn(context, router_id, port)
-        # else:
-        #     self.create_lrouter_port_in_ovn(context, router_id, port)
+        ip_configs = _get_ip_configurations_for_subnet(router_interface_info)
+        if len(ip_configs) == 0:
+            LOG.debug("No IP configurations found for any "
+                "of the subnets configured on %s" % router_interface_info["network_id"])
+
+        lb = self._get_lb_for_router(router_id)
+        if not lb:
+            return
+        for ip in ip_configs:
+            # for some reason, the IPConfiguration resource does not allow
+            # PUT operations. We have to get the NetworkInterface object
+            # and update that.
+            net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
+            for idx, i in enumerate(net_iface.ip_configurations):
+                if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
+                    resource = client.Resource(
+                        resource_ref=lb.backend_address_pools[0].resource_ref)
+                    if net_iface.ip_configurations[idx].backend_address_pools:
+                        net_iface.ip_configurations[idx].backend_address_pools.append(resource)
+                    else:
+                        net_iface.ip_configurations[idx].backend_address_pools = [resource,]
+                    break
+            net_iface.commit(wait=True)
         return router_interface_info
 
     def remove_router_interface(self, context, router_id, interface_info):
@@ -382,16 +456,29 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
 
         LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
         LOG.debug("INTERFACE info: %r" % router_interface_info)
-        # port_id = router_interface_info['port_id']
-        # try:
-        #     port = self._plugin.get_port(context, port_id)
-        #     # The router interface port still exists, call ovn to update it.
-        #     self.update_lrouter_port_in_ovn(context, router_id, port)
-        # except n_exc.PortNotFound:
-        #     # The router interface port doesn't exist any more, call ovn to
-        #     # delete it.
-        #     self._ovn.delete_lrouter_port(utils.ovn_lrouter_port_name(port_id),
-        #                                   utils.ovn_name(router_id),
-        #                                   if_exists=False
-        #                                   ).execute(check_error=True)
+
+        ip_configs = _get_ip_configurations_for_subnet(router_interface_info)
+        if len(ip_configs) == 0:
+            LOG.debug("No IP configurations found for any "
+                "of the subnets configured on %s" % router_interface_info["network_id"])
+
+        lb = self._get_lb_for_router(router_id)
+        if not lb:
+            return
+        for ip in ip_configs:
+            # for some reason, the IPConfiguration resource does not allow
+            # PUT operations. We have to get the NetworkInterface object
+            # and update that.
+            net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
+            for idx, i in enumerate(net_iface.ip_configurations):
+                if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
+                    resource = client.Resource(
+                        resource_ref=lb.backend_address_pools[0].resource_ref)
+                    backend_pool = net_iface.ip_configurations[idx].backend_address_pools
+                    if backend_pool and resource in backend_pool:
+                        net_iface.ip_configurations[idx].backend_address_pools.remove(resource)
+                    if len(net_iface.ip_configurations[idx].backend_address_pools) == 0:
+                        net_iface.ip_configurations[idx].backend_address_pools = None
+                    break
+            net_iface.commit(wait=True)
         return router_interface_info

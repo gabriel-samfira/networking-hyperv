@@ -702,7 +702,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             subnets = [subnets,]
 
         # there can be only one
-        # lb_manager = client.LoadBalancerManager.get()[0]
+        lb_manager = client.LoadBalancerManager.get()[0]
         network_subnets = [i.resource_id for i in network.subnetworks]
         ip_pools = [j.resource_id for i in network.subnetworks if i.ip_pools for j in i.ip_pools]
         for i in subnets:
@@ -739,11 +739,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     grandparent_id=network.resource_id,
                     start_ip_address=startIp,
                     end_ip_address=endIp).commit(wait=True)
-                # pool_resource  = client.Resource(resource_ref=ip_pool.resource_ref)
-                # if pool_resource not in lb_manager.vip_ip_pools:
-                #     lb_manager.vip_ip_pools.append(pool_resource)
+                pool_resource  = client.Resource(resource_ref=ip_pool.resource_ref)
+                if pool_resource not in lb_manager.vip_ip_pools:
+                    lb_manager.vip_ip_pools.append(pool_resource)
         network = client.LogicalNetworks.get(resource_id=network.resource_id)
-        # lb_manager.commit(wait=True)
+        lb_manager.commit(wait=True)
         return network
 
     def create_subnet_postcommit(self, context):
