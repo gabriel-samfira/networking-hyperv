@@ -38,7 +38,6 @@ from neutron.extensions.external_net import EXTERNAL
 from neutron.db import provisioning_blocks
 from neutron.db import segments_db
 from neutron.extensions import providernet
-from neutron.callbacks import resources
 from neutron import context as n_context
 from neutron import worker
 

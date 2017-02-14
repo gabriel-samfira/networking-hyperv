@@ -13,6 +13,9 @@ from neutron_lib.plugins import directory
 
 from neutron.plugins.common import constants as n_const
 from neutron import context as n_context
+from neutron.callbacks import registry
+from neutron.callbacks import resources
+from neutron.callbacks import events
 
 from neutron.services import service_base
 from neutron.db import common_db_mixin
@@ -61,68 +64,6 @@ class HNVMixin(object):
             return subnet
         return None
 
-
-class HNVL3RouterPlugin(service_base.ServicePluginBase,
-                        common_db_mixin.CommonDbMixin,
-                        extraroute_db.ExtraRoute_dbonly_mixin,
-                        HNVMixin):
-
-    supported_extension_aliases = [
-            'router',
-            'extraroute']
-
-    def __init__(self):
-        LOG.info(_LI("Starting HNVL3RouterPlugin"))
-        super(HNVL3RouterPlugin, self).__init__()
-
-    def get_plugin_type(self):
-        return n_const.L3_ROUTER_NAT
-
-    def get_plugin_description(self):
-        """returns string description of the plugin."""
-        return ("L3 Router Service Plugin for basic L3 forwarding"
-                " using HNV") 
-
-    def add_router_interface(self, context, router_id, interface_info):
-        router_interface_info = \
-            super(HNVL3RouterPlugin, self).add_router_interface(
-                context, router_id, interface_info)
-
-        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
-        LOG.debug("INTERFACE info: %r" % router_interface_info)
-        # port = self._plugin.get_port(context, router_interface_info['port_id'])
-        # if (len(router_interface_info['subnet_ids']) == 1 and
-        #         len(port['fixed_ips']) > 1):
-        #     # NOTE(lizk) It's adding a subnet onto an already existing router
-        #     # interface port, try to update lrouter port 'networks' column.
-        #     self.update_lrouter_port_in_ovn(context, router_id, port)
-        # else:
-        #     self.create_lrouter_port_in_ovn(context, router_id, port)
-        return router_interface_info
-
-    def remove_router_interface(self, context, router_id, interface_info):
-        router_interface_info = \
-            super(HNVL3RouterPlugin, self).remove_router_interface(
-                context, router_id, interface_info)
-
-        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
-        LOG.debug("INTERFACE info: %r" % router_interface_info)
-        # port_id = router_interface_info['port_id']
-        # try:
-        #     port = self._plugin.get_port(context, port_id)
-        #     # The router interface port still exists, call ovn to update it.
-        #     self.update_lrouter_port_in_ovn(context, router_id, port)
-        # except n_exc.PortNotFound:
-        #     # The router interface port doesn't exist any more, call ovn to
-        #     # delete it.
-        #     self._ovn.delete_lrouter_port(utils.ovn_lrouter_port_name(port_id),
-        #                                   utils.ovn_name(router_id),
-        #                                   if_exists=False
-        #                                   ).execute(check_error=True)
-        return router_interface_info
-
-
-        
 
 class LoadBalancerManager(HNVMixin):
 
@@ -386,3 +327,71 @@ class PublicIPAddressManager(HNVMixin):
     'context': context}
 """
 
+class HNVL3RouterPlugin(service_base.ServicePluginBase,
+                        common_db_mixin.CommonDbMixin,
+                        extraroute_db.ExtraRoute_dbonly_mixin,
+                        HNVMixin):
+
+    supported_extension_aliases = [
+            'router',
+            'extraroute']
+
+    def __init__(self):
+        LOG.info(_LI("Starting HNVL3RouterPlugin"))
+        super(HNVL3RouterPlugin, self).__init__()
+        self._public_ip = PublicIPAddressManager()
+        self.subscribe()
+
+    def subscribe(self):
+        registry.subscribe(self.process_sg_notification,
+                           resources.FLOATING_IP,
+                           events.AFTER_UPDATE)
+
+    def process_floating_ip_update(self, resource, event, trigger, **kwargs):
+        LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
+
+    def get_plugin_type(self):
+        return n_const.L3_ROUTER_NAT
+
+    def get_plugin_description(self):
+        """returns string description of the plugin."""
+        return ("L3 Router Service Plugin for basic L3 forwarding"
+                " using HNV") 
+
+    def add_router_interface(self, context, router_id, interface_info):
+        router_interface_info = \
+            super(HNVL3RouterPlugin, self).add_router_interface(
+                context, router_id, interface_info)
+
+        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
+        LOG.debug("INTERFACE info: %r" % router_interface_info)
+        # port = self._plugin.get_port(context, router_interface_info['port_id'])
+        # if (len(router_interface_info['subnet_ids']) == 1 and
+        #         len(port['fixed_ips']) > 1):
+        #     # NOTE(lizk) It's adding a subnet onto an already existing router
+        #     # interface port, try to update lrouter port 'networks' column.
+        #     self.update_lrouter_port_in_ovn(context, router_id, port)
+        # else:
+        #     self.create_lrouter_port_in_ovn(context, router_id, port)
+        return router_interface_info
+
+    def remove_router_interface(self, context, router_id, interface_info):
+        router_interface_info = \
+            super(HNVL3RouterPlugin, self).remove_router_interface(
+                context, router_id, interface_info)
+
+        LOG.debug("ARGS %r ---->>> %r ----->>> %r" % (context, router_id, interface_info))
+        LOG.debug("INTERFACE info: %r" % router_interface_info)
+        # port_id = router_interface_info['port_id']
+        # try:
+        #     port = self._plugin.get_port(context, port_id)
+        #     # The router interface port still exists, call ovn to update it.
+        #     self.update_lrouter_port_in_ovn(context, router_id, port)
+        # except n_exc.PortNotFound:
+        #     # The router interface port doesn't exist any more, call ovn to
+        #     # delete it.
+        #     self._ovn.delete_lrouter_port(utils.ovn_lrouter_port_name(port_id),
+        #                                   utils.ovn_name(router_id),
+        #                                   if_exists=False
+        #                                   ).execute(check_error=True)
+        return router_interface_info
