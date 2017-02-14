@@ -739,7 +739,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     start_ip_address=startIp,
                     end_ip_address=endIp).commit(wait=True)
                 pool_resource  = client.Resource(resource_ref=ip_pool.resource_ref)
-                if pool_resource not in lb_manager.vip_ip_pools:
+                found = False
+                for vip_pool in lb_manager.vip_ip_pools:
+                    if vip_pool.resource_ref == ip_pool.resource_ref:
+                        found = True
+                if not found:
                     lb_manager.vip_ip_pools.append(pool_resource)
         network = client.LogicalNetworks.get(resource_id=network.resource_id)
         lb_manager.commit(wait=True)
@@ -848,6 +852,23 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             cidr)
 
     def _remove_subnet_from_logical_network(self, network_id, subnet_id):
+        subnet = None
+        try:
+            subnet = client.LogicalSubnetworks.get(parent_id=network_id, resource_id=subnet_id)
+        except hnv_exception.NotFound:
+            return
+        refs = []
+        if subnet.ip_pools:
+            for ip_pool in subnet.ip_pools:
+                refs.append(ip_pool.resource_ref)
+        lb_manager = client.LoadBalancerManager.get()
+        new = []
+        for i in lb_manager.vip_ip_pools:
+            if i.resource_ref in refs:
+                continue
+            new.append(i)
+        lb_manager.vip_ip_pools = new
+        lb_manager = lb_manager.commit(wait=True)
         client.LogicalSubnetworks.remove(parent_id=network_id, resource_id=subnet_id)
 
     def delete_subnet_postcommit(self, context):
@@ -1055,6 +1076,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return port_settings
 
     def _get_nc_ip_configuration(self, ip, network_id, port, cached_subnets):
+        LOG.debug("PORT_DETAILS: %r" % port)
         port_id = port["id"]
         acl = self._get_port_acl(port)
         subnet_id = ip.get("subnet_id")

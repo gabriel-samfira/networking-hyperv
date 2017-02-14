@@ -293,8 +293,6 @@ class PublicIPAddressManager(HNVMixin):
         return net_adapter.commit(wait=true)
 
     def _disassociate_public_ip(self, assoc_data):
-        dip = assoc_data["fixed_ip_address"]
-        net_adapter_id = assoc_data["fixed_port_id"]
         vip_address = assoc_data["floating_ip_address"]
         vip_id = assoc_data["floating_ip_id"]
         vip_obj = self._get_and_validate_vip(vip_address, vip_id)
@@ -368,6 +366,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
 
     def process_floating_ip_update(self, resource, event, trigger, **kwargs):
         LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
+        self._public_ip.update_vip_association(kwargs)
 
     def get_plugin_type(self):
         return n_const.L3_ROUTER_NAT
