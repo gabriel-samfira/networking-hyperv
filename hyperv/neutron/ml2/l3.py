@@ -548,7 +548,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                     else:
                         net_iface.ip_configurations[idx].backend_address_pools = [resource,]
                     break
-            net_iface.commit(wait=True)
+            net_iface.commit(wait=False)
         return router_interface_info
 
     def remove_router_interface(self, context, router_id, interface_info):
@@ -584,6 +584,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                     net_iface.ip_configurations[idx].backend_address_pools = new
                     break
             LOG.debug("NET_IFACE: %r" % net_iface.dump())
-            net_iface.commit(wait=True)
+            net_iface.commit(wait=False)
         return router_interface_info
 
