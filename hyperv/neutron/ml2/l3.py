@@ -72,7 +72,7 @@ class HNVMixin(common_db_mixin.CommonDbMixin,
             return
 
         ext_port = self._plugin.get_port(self._admin_context, ext_port_id)
-        lb = self._lb.get(ext_port)
+        lb = LoadBalancerManager.get(ext_port)
         if not lb.backend_address_pools:
             LOG.debug("There are no backend address pools defined on %s" % lb.resource_id)
             return
@@ -233,9 +233,10 @@ class LoadBalancerManager(HNVMixin):
     def _get_router_interfaces_for_subnet(self, subnet):
         filters = {
             'network_id': [subnet["network_id"]],
+            'device_owner': [const.DEVICE_OWNER_ROUTER_INTF], 
             'fixed_ips': {'subnet_id': [subnet["subnet_id"]]}
         }
-        port = self._plugin.get_ports(self._admin_context, filters=filters)
+        ports = self._plugin.get_ports(self._admin_context, filters=filters)
         return ports
 
     def _subnet_cache_key(self, subnet):
@@ -264,7 +265,7 @@ class LoadBalancerManager(HNVMixin):
         ret = []
         for i in lbs:
             ret.append(i.backend_address_pools[0])
-        return []
+        return ret
 
     @classmethod
     def create(cls, port):
