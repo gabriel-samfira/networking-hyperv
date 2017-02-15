@@ -226,10 +226,6 @@ class LoadBalancerManager(HNVMixin):
         resource_ids = self._get_resource_ids(port)
         client.LoadBalancers.remove(resource_id=resource_ids["lb-id"])
 
-    def _get_load_balancer(self, port):
-        resource_ids = self._get_resource_ids(port)
-        return client.LoadBalancers.get(resource_id=resource_ids["lb-id"])
-
     def _get_router_interfaces_for_subnet(self, subnet):
         filters = {
             'network_id': [subnet["network_id"]],
@@ -260,12 +256,33 @@ class LoadBalancerManager(HNVMixin):
                 ret.append(lb)
         return ret
 
+    def _get_load_balancer(self, port):
+        resource_ids = self._get_resource_ids(port)
+        return client.LoadBalancers.get(resource_id=resource_ids["lb-id"])
+
+    @classmethod
+    def get_all(cls):
+        vips = client.LoadBalancers.get()
+        ret = {}
+        # TODO: abstract this logic. It's used in various places
+        for i in vips:
+            if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
+                continue
+            ret[i.resource_id] = i
+        return ret
+
     def get_port_backend_pool(self, port):
         lbs = self._get_lb_for_port(port)
         ret = []
         for i in lbs:
             ret.append(i.backend_address_pools[0])
         return ret
+
+    @classmethod
+    def bulk_create(cls, ports):
+        obj = cls()
+        for port in ports:
+            obj._create(port)
 
     @classmethod
     def create(cls, port):
@@ -276,6 +293,12 @@ class LoadBalancerManager(HNVMixin):
     def remove(cls, port):
         obj = cls()
         return obj._remove_load_balancer(port)
+
+    @classmethod
+    def remove_by_ids(cls, ports):
+        obj = cls()
+        for i in ports:
+            obj._remove_load_balancer(i)
 
     @classmethod
     def get(cls, port):
@@ -433,6 +456,15 @@ class PublicIPAddressManager(HNVMixin):
         resource = client.Resource(resource_ref=vip.resource_ref)
         return resource
 
+    def get_all(self):
+        vips = client.PublicIPAddresses.get()
+        ret = {}
+        for i in vips:
+            if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
+                continue
+            ret[i.resource_id] = i
+        return ret
+
     @classmethod
     def update_vip_association(cls, assoc_data):
         obj = cls()
@@ -443,6 +475,12 @@ class PublicIPAddressManager(HNVMixin):
         return obj._disassociate_public_ip(assoc_data)
 
     @classmethod
+    def bulk_create(cls, ports):
+        obj = cls()
+        for port in ports:
+            obj._create(port)
+
+    @classmethod
     def create(cls, port):
         obj = cls()
         return obj._create(port)
@@ -451,6 +489,12 @@ class PublicIPAddressManager(HNVMixin):
     def remove(cls, port):
         obj = cls()
         return obj._delete(port)
+
+    @classmethod
+    def remove_by_ids(cls, ports):
+        obj = cls()
+        for i in ports:
+            obj._delete(i)
 
 """
 {

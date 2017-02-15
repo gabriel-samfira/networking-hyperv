@@ -232,6 +232,29 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             self.update_port(port)
         return
 
+    def _get_db_ports(self):
+        admin_context = n_context.get_admin_context()
+        db_ports = self._plugin.get_ports(admin_context)
+        ports = {
+            "external": {},
+            "compute": {},
+            "floating": {},
+        }
+        for i in db_ports:
+            owner = i.get("device_owner")
+            if not owner:
+                continue
+            if owner == const.DEVICE_OWNER_ROUTER_GW:
+                section = "external"
+            elif owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
+                section = "compute"
+            elif owner == const.DEVICE_OWNER_FLOATINGIP:
+                section = "floating"
+            if not ports[section].get(i["id"]):
+                ports[section][i["id"]] = i
+        LOG.debug("FOUND DB ports: %r" % ports)
+        return ports
+
     # TODO:
     # create onat rule for network:router_gateway port
     # sync router ports
@@ -243,23 +266,37 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     # network interfaces and apply outbound nat rules if a gateway is set
     def _sync_ports(self):
         nc_ports = self._get_nc_ports()
+        nc_lbs = l3.LoadBalancerManager.get_all()
+        nc_vips = l3.PublicIPAddressManager.get_all()
         db_ports = self._get_db_ports()
 
-        nc_set = set(nc_ports.keys())
-        db_set = set(db_ports["compute"].keys())
+        gw_add, gw_remove, gw_sync = utils.diff_dictionary_keys(
+            nc_lbs, db_ports["external"])
 
-        must_remove = list(nc_set - db_set)
-        must_add = list(db_set - nc_set)
-        must_sync = list(db_set & nc_set)
-        
-        # to_remove = {k: nc_ports[k] for k in must_remove}
-        to_add = [db_ports["compute"][k] for k in must_add]
-        to_sync_db = [db_ports["compute"][k] for k in must_sync]
+        vip_add, vip_remove, vip_sync = utils.diff_dictionary_keys(
+            nc_lbs, db_ports["floating"])
 
-        for port_id in must_remove:
-            self._remove_nc_port(port_id)
-        self._create_ports_in_nc(to_add)
-        self._sync_db_ports(to_sync_db)
+        c_add, c_remove, c_sync = utils.diff_dictionary_keys(
+            nc_ports, db_ports["compute"])
+
+        gw_to_add = [db_ports["external"][k] for k in gw_add]
+        gw_to_sync = [db_ports["external"][k] for k in gw_sync]
+
+        vip_to_add = [db_ports["external"][k] for k in gw_add]
+        vip_to_sync = [db_ports["external"][k] for k in gw_sync]
+
+        c_to_add = [db_ports["compute"][k] for k in c_add]
+        c_to_sync = [db_ports["compute"][k] for k in c_sync]
+
+        self._lb_manager.remove_by_ids(gw_remove)
+        self._lb_manager.bulk_create(gw_to_add)
+
+        self._public_ips.remove_by_ids(vip_remove)
+        self._public_ips.bulk_create(vip_to_add)
+
+        self._remove_nc_ports(c_remove)
+        self._create_ports_in_nc(c_to_add)
+        self._sync_db_ports(c_to_sync)
 
     def _get_nc_virtual_networks(self):
         networks = client.VirtualNetworks.get()
@@ -382,29 +419,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._sync_virtual_subnets(sync_vr, db_networks["compute"], nc_virtual_networks)
         self._sync_logical_subnets(sync_ln, db_networks["external"], nc_logical_networks)
         #TODO (gsamfira): sync logical subnets
-
-    def _get_db_ports(self):
-        admin_context = n_context.get_admin_context()
-        db_ports = self._plugin.get_ports(admin_context)
-        ports = {
-            "external": {},
-            "compute": {},
-            "other": {},
-        }
-        for i in db_ports:
-            owner = i.get("device_owner")
-            if not owner:
-                continue
-            if owner == const.DEVICE_OWNER_ROUTER_GW:
-                section = "external"
-            elif owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
-                section = "compute"
-            else:
-                section = "other"
-            if not ports[section].get(i["id"]):
-                ports[section][i["id"]] = i
-        LOG.debug("FOUND DB ports: %r" % ports)
-        return ports
 
     def _get_nc_ports(self):
         # TODO(gsamfira): maybe cache this value?
@@ -1218,8 +1232,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                         self.vif_type, {})
                 LOG.debug("Bound using segment: %s", segment)
                 return
-
-        
 
     def get_workers(self):
         """Get any NeutronWorker instances that should have their own process
