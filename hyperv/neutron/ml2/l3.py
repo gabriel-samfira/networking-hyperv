@@ -64,6 +64,79 @@ class HNVMixin(object):
             return subnet
         return None
 
+    def _get_lb_for_router(self, router):
+        ext_port_id = router.get("gw_port_id")
+        if not ext_port_id:
+            LOG.debug("Router %s has no external network set. Nothing to do here" % router_id)
+            return
+
+        ext_port = self._plugin.get_port(self._admin_context, ext_port_id)
+        lb = self._lb.get(ext_port)
+        if not lb.backend_address_pools:
+            LOG.debug("There are no backend address pools defined on %s" % lb.resource_id)
+            return
+        return lb
+
+    def _get_lb_for_router_by_id(self, router_id):
+        router = self.get_router(self._admin_context, router_id)
+        return self._get_lb_for_router(router)
+
+    def _get_attached_router_interfaces(self, context, router_id):
+        filters = dict(
+                device_id=[router_id],
+                device_owner=[const.DEVICE_OWNER_ROUTER_INTF])
+        ports = self._plugin.get_ports(context, filters=filters)
+        return ports
+
+    def _get_virtual_networks(self, ids):
+        vn = client.VirtualNetworks.get()
+        return [i for i in vn if i.resource_id in ids]
+
+    def _get_network_interfaces(self, ids):
+        net = client.NetworkInterfaces.get()
+        return {i.resource_id: i for i in net if i.resource_id in ids}
+
+    def _get_subnet_info_from_interface(self, interface):
+        net_id = interface["network_id"]
+        ret = []
+        fixed_ips = interface.get("fixed_ips", [])
+        for i in fixed_ips:
+            tmp = {
+                'network_id': net_id,
+                'subnet_id': i["subnet_id"]
+            } 
+            if tmp in ret:
+                continue
+            ret.append(tmp)
+        return ret
+
+    def _get_connected_interfaces(self, subnets):
+        ip_configurations = []
+        net_ids = [i["network_id"] for i in subnets]
+        virt_nets = self._get_virtual_networks(net_ids)
+        for net in virt_nets:
+            for sub in net.subnetworks:
+                details = {
+                    "network_id": sub.parent_id,
+                    "subnet_id": sub.resource_id
+                }
+                if details in subnets:
+                    for ip in sub.ip_configuration:
+                        ip_configurations.append(ip.get_resource())
+        # Unfortunately, calling PUT on an IP resource is not allowed (for some reason). To update the
+        # NAT load balancer, we need to update the IP configuration as part of the network interface
+        # and call PUT on the network interface itself
+        net_iface_ids = [i.parent_id for i in ip_configurations]
+        net_ifaces = self._get_network_interfaces(net_iface_ids)
+        ret = {}
+        for i in ip_configurations:
+            if not ret.get(i.parent_id):
+                ret[i.parent_id] = {
+                    "iface": net_ifaces[i.parent_id],
+                    "ip_configs": []}
+            ret[i.parent_id]["ip_configs"].append(i.resource_id)
+        return ret
+
 
 class LoadBalancerManager(HNVMixin):
 
@@ -90,7 +163,7 @@ class LoadBalancerManager(HNVMixin):
             "onat-id": onat_id,
         }
 
-    def _get_frontend_ip_configurations(self, ips, lb, resource_ids):
+    def _get_frontend_ip_configurations(self, ips, resource_ids):
         ret = []
         for ip in ips:
             frontend_id = "%s-%s" % (resource_ids["fe-id"], ip["ip_address"])
@@ -99,12 +172,10 @@ class LoadBalancerManager(HNVMixin):
                 raise Exception("Failed to find subnet for ip %(ip)s in "
                     "network controller" % {
                         "ip": ip["ip_address"]})
-            load_balancer = client.LoadBalancers.get(resource_id=lb.resource_id)
-            LOG.debug("LB is: %r" % load_balancer.dump())
             #TODO: Consider using wait=False wherever possible.
             fe = client.FrontendIPConfigurations(
                 tags={"provider": constants.HNV_PROVIDER_NAME},
-                parent_id=lb.resource_id,
+                parent_id=resource_ids["lb-id"],
                 resource_id=frontend_id,
                 subnet=ip_subnet,
                 private_ip_address=ip["ip_address"],
@@ -126,27 +197,27 @@ class LoadBalancerManager(HNVMixin):
         if not fixed_ips:
             LOG.debug("No fixed ips set on this port. Nothing to do")
             return
-        lb = client.LoadBalancers(
-            tags={"provider": constants.HNV_PROVIDER_NAME},
-            resource_id=resource_ids["lb-id"]).commit(wait=True)
-        LOG.debug("Created load balancer: %r" % lb.dump())
-        fe_ips = self._get_frontend_ip_configurations(fixed_ips, lb, resource_ids)
+        fe_ips = self._get_frontend_ip_configurations(
+            fixed_ips, resource_ids)
         if len(fe_ips) == 0:
             raise Exception("Failed to get frontend IP configurations")
         be = client.BackendAddressPools(
             tags={"provider": constants.HNV_PROVIDER_NAME},
-            parent_id=lb.resource_id,
-            resource_id=resource_ids["be-id"]).commit(wait=True)
-        be_resource = client.Resource(resource_ref=be.resource_ref)
+            parent_id=resource_ids["lb-id"],
+            resource_id=resource_ids["be-id"])
         onat = client.OutboundNATRules(
             tags={"provider": constants.HNV_PROVIDER_NAME},
             resource_id=resource_ids["onat-id"],
-            parent_id=lb.resource_id,
+            parent_id=resource_ids["lb-id"],
             frontend_ip_configurations=fe_ips,
-            backend_address_pool=be_resource,
+            backend_address_pool=be,
             protocol="All")
-        LOG.debug("ONAT rule: %r" % onat.dump())
-        onat.commit(wait=True)
+        lb = client.LoadBalancers(
+            tags={"provider": constants.HNV_PROVIDER_NAME},
+            resource_id=resource_ids["lb-id"],
+            outbound_nat_rules=[onat,],
+            backend_address_pools=[be,],
+            frontend_ip_configurations=[fe,]).commit(wait=True)
         return client.LoadBalancers.get(resource_id=lb.resource_id)
 
     def _remove_load_balancer(self, port):
@@ -310,6 +381,19 @@ class PublicIPAddressManager(HNVMixin):
                 break
         net_iface.commit(wait=True)
 
+    def get_vip_for_internal_port(self, port, ip):
+        port_id = port["id"]
+        filters = {
+            'fixed_port_id': [port_id],
+            'fixed_ip_address': [ip]
+        }
+        floating_ip = self.get_floatingips(self._admin_context, filters=filters)
+        if len(floating_ip) == 0:
+            return None
+        vip = client.PublicIPAddresses.get(resource_id=floating_ip[0]["id"])
+        resource = client.Resource(resource_ref=vip.resource_ref)
+        return resource
+
     @classmethod
     def update_vip_association(cls, assoc_data):
         obj = cls()
@@ -387,79 +471,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
             if nc_subnet.ip_configuration:
                 for ip_conf in nc_subnet.ip_configuration:
                     ret.append(ip_conf)
-        return ret
-
-    def _get_lb_for_router(self, router):
-        ext_port_id = router.get("gw_port_id")
-        if not ext_port_id:
-            LOG.debug("Router %s has no external network set. Nothing to do here" % router_id)
-            return
-
-        ext_port = self._plugin.get_port(self._admin_context, ext_port_id)
-        lb = self._lb.get(ext_port)
-        if not lb.backend_address_pools:
-            LOG.debug("There are no backend address pools defined on %s" % lb.resource_id)
-            return
-        return lb
-
-    def _get_lb_for_router_by_id(self, router_id):
-        router = self.get_router(self._admin_context, router_id)
-        return self._get_lb_for_router(router)
-
-    def _get_attached_router_interfaces(self, context, router_id):
-        filters = dict(
-                device_id=[router_id],
-                device_owner=[const.DEVICE_OWNER_ROUTER_INTF])
-        ports = self._plugin.get_ports(context, filters=filters)
-        return ports
-
-    def _get_virtual_networks(self, ids):
-        vn = client.VirtualNetworks.get()
-        return [i for i in vn if i.resource_id in ids]
-
-    def _get_network_interfaces(self, ids):
-        net = client.NetworkInterfaces.get()
-        return {i.resource_id: i for i in net if i.resource_id in ids}
-
-    def _get_subnet_info_from_interface(self, interface):
-        net_id = interface["network_id"]
-        ret = []
-        fixed_ips = interface.get("fixed_ips", [])
-        for i in fixed_ips:
-            tmp = {
-                'network_id': net_id,
-                'subnet_id': i["subnet_id"]
-            } 
-            if tmp in ret:
-                continue
-            ret.append(tmp)
-        return ret
-
-    def _get_connected_interfaces(self, subnets):
-        ip_configurations = []
-        net_ids = [i["network_id"] for i in subnets]
-        virt_nets = self._get_virtual_networks(net_ids)
-        for net in virt_nets:
-            for sub in net.subnetworks:
-                details = {
-                    "network_id": sub.parent_id,
-                    "subnet_id": sub.resource_id
-                }
-                if details in subnets:
-                    for ip in sub.ip_configuration:
-                        ip_configurations.append(ip.get_resource())
-        # Unfortunately, calling PUT on an IP resource is not allowed (for some reason). To update the
-        # NAT load balancer, we need to update the IP configuration as part of the network interface
-        # and call PUT on the network interface itself
-        net_iface_ids = [i.parent_id for i in ip_configurations]
-        net_ifaces = self._get_network_interfaces(net_iface_ids)
-        ret = {}
-        for i in ip_configurations:
-            if not ret.get(i.parent_id):
-                ret[i.parent_id] = {
-                    "iface": net_ifaces[i.parent_id],
-                    "ip_configs": []}
-            ret[i.parent_id]["ip_configs"].append(i.resource_id)
         return ret
 
     def _apply_lb_on_connected_networks(self, router_interfaces, lb):
@@ -543,10 +554,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                 if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
                     resource = client.Resource(
                         resource_ref=lb.backend_address_pools[0].resource_ref)
-                    if net_iface.ip_configurations[idx].backend_address_pools:
-                        net_iface.ip_configurations[idx].backend_address_pools.append(resource)
-                    else:
-                        net_iface.ip_configurations[idx].backend_address_pools = [resource,]
+                    net_iface.ip_configurations[idx].backend_address_pools.append(resource)
                     break
             net_iface.commit(wait=False)
         return router_interface_info

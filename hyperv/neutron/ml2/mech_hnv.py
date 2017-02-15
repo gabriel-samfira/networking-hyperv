@@ -119,6 +119,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._logicalNetworkID = cfg.CONF.HNV.logical_network
         self._ln = self._get_logical_network(self._logicalNetworkID)
         self._public_ips = l3.PublicIPAddressManager()
+        self._lb_manager = l3.LoadBalancerManager()
         # addressSpace is a mandatory parameter when creating a virtual network
         # in the HNV network controller. We add a bogus address space when we
         # create the initial virtual network. This gets removed when we add our
@@ -1080,6 +1081,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def _get_nc_ip_configuration(self, ip, network_id, port, cached_subnets):
         LOG.debug("PORT_DETAILS: %r" % port)
         port_id = port["id"]
+        public_ip = self._public_ips.get_vip_for_internal_port(
+            port, ip["ip_address"])
+        # backend_pools = self._lb_manager.
         acl = self._get_port_acl(port)
         subnet_id = ip.get("subnet_id")
         neutron_subnet = self._get_subnet_from_neutron(subnet_id)
@@ -1097,6 +1101,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     resource_id=resource_id,
                     private_ip_address=ip["ip_address"],
                     private_ip_allocation_method=constants.HNV_METHOD_STATIC,
+                    public_ip_address=public_ip,
+                    backend_address_pools=backend_pools,
                     subnet=subnet_resource,
                     access_controll_list=acl)
         return (ipConfiguration, dns_nameservers, cached_subnets)
@@ -1133,7 +1139,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             'payload': networkInterface,
             })
         try:
-            networkInterface = networkInterface.commit(wait=True)
+            networkInterface = networkInterface.commit(wait=False)
         except Exception as err:
             LOG.debug("Got error %r" % err.response.content)
             raise err
