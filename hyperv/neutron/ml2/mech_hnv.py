@@ -1075,12 +1075,13 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             qos_settings=qos_settings)
         return port_settings
 
-    def _get_nc_ip_configuration(self, ip, network_id, port, cached_subnets):
+    def _get_nc_ip_configuration(self, ip, port, cached_subnets):
+        network_id = port["network_id"]
         LOG.debug("PORT_DETAILS: %r" % port)
         port_id = port["id"]
         public_ip = self._public_ips.get_vip_for_internal_port(
             port, ip["ip_address"])
-        # backend_pools = self._lb_manager.
+        backend_pools = self._lb_manager.get_port_backend_pool(port)
         acl = self._get_port_acl(port)
         subnet_id = ip.get("subnet_id")
         neutron_subnet = self._get_subnet_from_neutron(subnet_id)
@@ -1099,13 +1100,12 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     private_ip_address=ip["ip_address"],
                     private_ip_allocation_method=constants.HNV_METHOD_STATIC,
                     public_ip_address=public_ip,
-                    #backend_address_pools=backend_pools,
+                    backend_address_pools=backend_pools,
                     subnet=subnet_resource,
                     access_controll_list=acl)
         return (ipConfiguration, dns_nameservers, cached_subnets)
 
     def get_port_details(self, port):
-        network_id = port["network_id"]
         mac_address = port["mac_address"].replace(":", "").replace("-", "").upper()
         port_settings = self._get_port_settins(port)
         cached_subnets = {}
@@ -1113,8 +1113,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         dns_nameservers = set()
         for ip in port.get("fixed_ips", []):
             ipConfig, nameservers, cached_subnets = self._get_nc_ip_configuration(
-                ip, network_id,
-                port, cached_subnets)
+                ip, port, cached_subnets)
             ipConfigurations.append(ipConfig)
             dns_nameservers.update(nameservers)
         if len(ipConfigurations) == 0:

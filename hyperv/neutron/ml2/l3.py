@@ -143,6 +143,7 @@ class LoadBalancerManager(HNVMixin):
 
     def __init__(self):
         self._ln_cache = {}
+        self._subnet_lb_cache = {}
 
     def _get_logical_network(self, network_id):
         if self._ln_cache.get(network_id):
@@ -228,6 +229,42 @@ class LoadBalancerManager(HNVMixin):
     def _get_load_balancer(self, port):
         resource_ids = self._get_resource_ids(port)
         return client.LoadBalancers.get(resource_id=resource_ids["lb-id"])
+
+    def _get_router_interfaces_for_subnet(self, subnet):
+        filters = {
+            'network_id': [subnet["network_id"]],
+            'fixed_ips': {'subnet_id': [subnet["subnet_id"]]}
+        }
+        port = self._plugin.get_ports(self._admin_context, filters=filters)
+        return ports
+
+    def _subnet_cache_key(self, subnet):
+        return "%s-%s" % (subnet["subnet_id"], subnet["network_id"])
+
+    def _get_lb_for_port(self, port):
+        # TODO: check if there is an easier way to get the
+        # gw_port_id starting from the port of a VM
+        subnet_info = self._get_subnet_info_from_interface(port)
+        ret = []
+        for subnet in subnet_info:
+            k = self._subnet_cache_key(subnet)
+            if k in self._subnet_lb_cache:
+                ret.append(self._subnet_lb_cache[k])
+                continue
+            router_int = self._get_router_interfaces_for_subnet(subnet)
+            for r_int in router_int:
+                router_id = r_int["device_id"]
+                lb = self._get_lb_for_router_by_id(router_id)
+                self._subnet_lb_cache[k] = lb
+                ret.append(lb)
+        return ret
+
+    def get_port_backend_pool(self, port):
+        lbs = self._get_lb_for_port(port)
+        ret = []
+        for i in lbs:
+            ret.append(i.backend_address_pools[0])
+        return []
 
     @classmethod
     def create(cls, port):
