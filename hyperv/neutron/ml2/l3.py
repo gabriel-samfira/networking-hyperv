@@ -308,40 +308,6 @@ class LoadBalancerManager(HNVMixin):
         obj = cls()
         return obj._get_load_balancer(port)
 
-"""
-{
-  "allowed_address_pairs": [], 
-  "extra_dhcp_opts": [], 
-  "updated_at": "2017-02-09T23:01:30Z", 
-  "device_owner": "network:floatingip", 
-  "revision_number": 3, 
-  "binding:profile": {}, 
-  "fixed_ips": [
-    {
-      "subnet_id": "1c256e00-45d5-40ef-ba2c-b94aa2e137df", 
-      "ip_address": "10.7.12.100"
-    }
-  ], 
-  "id": "adece209-0a5a-445f-a91f-bbb7fd8e580f", 
-  "security_groups": [], 
-  "binding:vif_details": {}, 
-  "binding:vif_type": "unbound", 
-  "mac_address": "00:1d:d8:01:f0:6e", 
-  "device_id": "PENDING", 
-  "status": "N/A", 
-  "binding:host_id": "", 
-  "description": "", 
-  "qos_policy_id": null, 
-  "project_id": "", 
-  "name": "", 
-  "admin_state_up": true, 
-  "network_id": "ca44b6f3-b5dc-4a70-942e-7434e14d8b1f", 
-  "tenant_id": "", 
-  "created_at": "2017-02-09T23:01:30Z", 
-  "binding:vnic_type": "normal"
-}
-
-"""
 class PublicIPAddressManager(HNVMixin):
 
     def _get_vip_id(self, port):
@@ -505,18 +471,6 @@ class PublicIPAddressManager(HNVMixin):
         for i in ports:
             obj._delete_by_id(i)
 
-"""
-{
-    'fixed_ip_address': internal_ip_address,
-    'fixed_port_id': port_id,
-    'router_id': router_id,
-    'last_known_router_id': previous_router_id,
-    'floating_ip_address': floatingip_db.floating_ip_address,
-    'floating_network_id': floatingip_db.floating_network_id,
-    'floating_ip_id': floatingip_db.id,
-    'next_hop': next_hop,
-    'context': context}
-"""
 
 class HNVL3RouterPlugin(service_base.ServicePluginBase,
                         HNVMixin):
