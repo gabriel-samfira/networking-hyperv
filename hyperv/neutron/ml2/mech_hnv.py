@@ -241,6 +241,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             "floating": {},
         }
         for i in db_ports:
+            id_field = "id"
             owner = i.get("device_owner")
             if not owner:
                 continue
@@ -250,8 +251,16 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 section = "compute"
             elif owner == const.DEVICE_OWNER_FLOATINGIP:
                 section = "floating"
+                # in the case of floating IP ports, we care about
+                # the device_id. That is the actual FIP IP in the database
+                id_field = "device_id"
+            else:
+                continue
             if not ports[section].get(i["id"]):
-                ports[section][i["id"]] = i
+                p_id = i.get(id_field)
+                if not p_id:
+                    continue
+                ports[section][p_id] = i
         LOG.debug("FOUND DB ports: %r" % ports)
         return ports
 
@@ -274,7 +283,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             nc_lbs, db_ports["external"])
 
         vip_add, vip_remove, vip_sync = utils.diff_dictionary_keys(
-            nc_lbs, db_ports["floating"])
+            nc_vips, db_ports["floating"])
 
         c_add, c_remove, c_sync = utils.diff_dictionary_keys(
             nc_ports, db_ports["compute"])
@@ -282,16 +291,16 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         gw_to_add = [db_ports["external"][k] for k in gw_add]
         gw_to_sync = [db_ports["external"][k] for k in gw_sync]
 
-        vip_to_add = [db_ports["external"][k] for k in gw_add]
-        vip_to_sync = [db_ports["external"][k] for k in gw_sync]
+        vip_to_add = [db_ports["floating"][k] for k in vip_add]
+        vip_to_sync = [db_ports["floating"][k] for k in vip_sync]
 
         c_to_add = [db_ports["compute"][k] for k in c_add]
         c_to_sync = [db_ports["compute"][k] for k in c_sync]
 
-        self._lb_manager.remove_by_ids(gw_remove)
+        self._lb_manager.bulk_remove_by_id(gw_remove)
         self._lb_manager.bulk_create(gw_to_add)
 
-        self._public_ips.remove_by_ids(vip_remove)
+        self._public_ips.bulk_remove_by_id(vip_remove)
         self._public_ips.bulk_create(vip_to_add)
 
         self._remove_nc_ports(c_remove)

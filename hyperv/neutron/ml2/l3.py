@@ -222,9 +222,12 @@ class LoadBalancerManager(HNVMixin):
         lb.commit(wait=True)
         return client.LoadBalancers.get(resource_id=lb.resource_id)
 
+    def _remove_load_balancer_by_id(self, lb_id):
+        client.LoadBalancers.remove(resource_id=lb_id)
+
     def _remove_load_balancer(self, port):
         resource_ids = self._get_resource_ids(port)
-        client.LoadBalancers.remove(resource_id=resource_ids["lb-id"])
+        self._remove_load_balancer_by_id(resource_ids["lb-id"])
 
     def _get_router_interfaces_for_subnet(self, subnet):
         filters = {
@@ -268,7 +271,7 @@ class LoadBalancerManager(HNVMixin):
         for i in vips:
             if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
                 continue
-            ret[i.resource_id] = i
+            ret[i.resource_id[3:]] = i
         return ret
 
     def get_port_backend_pool(self, port):
@@ -282,7 +285,7 @@ class LoadBalancerManager(HNVMixin):
     def bulk_create(cls, ports):
         obj = cls()
         for port in ports:
-            obj._create(port)
+            obj._create_load_balancer(port)
 
     @classmethod
     def create(cls, port):
@@ -295,10 +298,10 @@ class LoadBalancerManager(HNVMixin):
         return obj._remove_load_balancer(port)
 
     @classmethod
-    def remove_by_ids(cls, ports):
+    def bulk_remove_by_id(cls, ports):
         obj = cls()
         for i in ports:
-            obj._remove_load_balancer(i)
+            obj._remove_load_balancer_by_id(i)
 
     @classmethod
     def get(cls, port):
@@ -344,7 +347,7 @@ class PublicIPAddressManager(HNVMixin):
     def _get_vip_id(self, port):
         owner = port.get("device_owner")
         if owner != const.DEVICE_OWNER_FLOATINGIP:
-            raise ValueError("Invalid port owner for floating IP")
+            raise ValueError("Invalid port owner for floating IP: %r" % owner)
         vip_id = port.get("device_id")
         if not vip_id:
             raise ValueError("Port does not have device ID assigned")
@@ -376,9 +379,8 @@ class PublicIPAddressManager(HNVMixin):
             idle_timeout=4).commit(wait=True)
         return public_ip
 
-    def _delete(self, port):
-        vip_id = self._get_vip_id(port)
-        ips = port.get("fixed_ips")
+    def _delete_by_id(self, vip_id, fixed_ips=None):
+        ips = fixed_ips
         try:
             vip = client.PublicIPAddresses.get(resource_id=vip_id)
         except hnv_exception.NotFound:
@@ -388,15 +390,21 @@ class PublicIPAddressManager(HNVMixin):
             # dissassociated this IP address from its ports and
             # has issued a delete. We may be out of sync. Disassociate
             # IP and delete
-            self._disassociate_public_ip({
-                'floating_ip_address': ips[0]["ip_address"],
-                'floating_ip_id': vip_id
-                })
+            args = {
+                'floating_ip_id': vip_id,
+            }
+            if ips:
+                args["floating_ip_address"] = ips[0]["ip_address"]
+            self._disassociate_public_ip(args)
         vip.remove(resource_id=vip.resource_id)
 
-    def _get_and_validate_vip(self, vip, vip_id):
+    def _delete(self, port):
+        vip_id = self._get_vip_id(port)
+        self._delete_by_id(vip_id)
+
+    def _get_vip(self, vip_id, vip=None):
         ip = client.PublicIPAddresses.get(resource_id=vip_id)
-        if ip.ip_address != vip:
+        if vip and ip.ip_address != vip:
             raise ValueError("floating_ip_address %(neutron_address)s has "
                 "a different value from the IP associated with "
                 "floating_ip_id in the network controller %(nc_address)s" % {
@@ -409,7 +417,7 @@ class PublicIPAddressManager(HNVMixin):
         net_adapter_id = assoc_data["fixed_port_id"]
         vip_address = assoc_data["floating_ip_address"]
         vip_id = assoc_data["floating_ip_id"]
-        vip_obj = self._get_and_validate_vip(vip_address, vip_id)
+        vip_obj = self._get_vip(vip_id, vip_address)
         vip_resource_ref = client.Resource(resource_ref=vip_obj.resource_ref)
         net_adapter = client.NetworkInterfaces.get(resource_id=net_adapter_id)
         found = False
@@ -426,9 +434,9 @@ class PublicIPAddressManager(HNVMixin):
         return net_adapter.commit(wait=True)
 
     def _disassociate_public_ip(self, assoc_data):
-        vip_address = assoc_data["floating_ip_address"]
+        vip_address = assoc_data.get("floating_ip_address")
         vip_id = assoc_data["floating_ip_id"]
-        vip_obj = self._get_and_validate_vip(vip_address, vip_id)
+        vip_obj = self._get_vip(vip_id, vip_address)
         if not vip_obj.ip_configuration:
             return
 
@@ -456,6 +464,7 @@ class PublicIPAddressManager(HNVMixin):
         resource = client.Resource(resource_ref=vip.resource_ref)
         return resource
 
+    @classmethod
     def get_all(self):
         vips = client.PublicIPAddresses.get()
         ret = {}
@@ -491,10 +500,10 @@ class PublicIPAddressManager(HNVMixin):
         return obj._delete(port)
 
     @classmethod
-    def remove_by_ids(cls, ports):
+    def bulk_remove_by_id(cls, ports):
         obj = cls()
         for i in ports:
-            obj._delete(i)
+            obj._delete_by_id(i)
 
 """
 {
