@@ -221,17 +221,15 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         for port in ports:
             owner = port.get("device_owner")
             if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
-                network = port.get("network_id")
                 self._acl_driver.add_member_to_sgs(port)
-                self._cached_port_iids[port["id"]] = self._bind_port_on_nc(
-                    port, network)
+                self._cached_port_iids[port["id"]] = self._bind_port_on_nc(port)
 
     def _sync_db_ports(self, ports):
         if type(ports) is not list:
             ports = [ports,]
         for port in ports:
             LOG.debug("Syncing port %r" % port)
-            self.update_port(port, port["network_id"])
+            self.update_port(port)
         return
 
     # TODO:
@@ -952,7 +950,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         """
         port = context.current
         original_port = context.original
-        network = context.network
         owner = port.get("device_owner")
         LOG.debug("ORIGINAL port: %r" % original_port)
         LOG.debug("NEW port: %r" % port)
@@ -962,7 +959,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             if members != original_members:
                 self._acl_driver.remove_member_from_sg(original_port)
                 self._acl_driver.add_member_to_sgs(port)
-            self.update_port(port, network.current["id"])
+            self.update_port(port)
         elif owner == const.DEVICE_OWNER_FLOATINGIP:
             # In the case of floating IPs we care about device_id. That will
             # be the resource_id of the PublicIPAddress
@@ -1038,7 +1035,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             raise err
         return (cache, subnet_obj)
 
-    def update_port(self, port, network_id):
+    def update_port(self, port):
         create = False
         try:
             nc_port = client.NetworkInterfaces.get(resource_id=port["id"])
@@ -1058,7 +1055,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 port[portbindings.VIF_DETAILS].update(
                     {constants.HNV_PORT_PROFILE_ID: instance_id})
             return
-        port_details = self.get_port_details(port, network_id)
+        port_details = self.get_port_details(port)
         nc_port.update(port_details)
         nc_port.commit(wait=True)
         return nc_port.instance_id
@@ -1107,7 +1104,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     access_controll_list=acl)
         return (ipConfiguration, dns_nameservers, cached_subnets)
 
-    def get_port_details(self, port, network_id):
+    def get_port_details(self, port):
+        network_id = port["network_id"]
         mac_address = port["mac_address"].replace(":", "").replace("-", "").upper()
         port_settings = self._get_port_settins(port)
         cached_subnets = {}
@@ -1131,8 +1129,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             "mac_allocation_method": constants.HNV_METHOD_STATIC,
         }
 
-    def _bind_port_on_nc(self, port, network_id):
-        port_options = self.get_port_details(port, network_id)
+    def _bind_port_on_nc(self, port):
+        port_options = self.get_port_details(port)
         networkInterface = client.NetworkInterfaces(**port_options)
         LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)r" % {
             'port_id': port["id"],
