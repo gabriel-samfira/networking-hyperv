@@ -1102,7 +1102,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     private_ip_address=ip["ip_address"],
                     private_ip_allocation_method=constants.HNV_METHOD_STATIC,
                     public_ip_address=public_ip,
-                    backend_address_pools=backend_pools,
+                    #backend_address_pools=backend_pools,
                     subnet=subnet_resource,
                     access_controll_list=acl)
         return (ipConfiguration, dns_nameservers, cached_subnets)

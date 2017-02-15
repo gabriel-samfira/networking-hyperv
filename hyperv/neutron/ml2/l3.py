@@ -33,7 +33,8 @@ def get_manager(port):
     return None
 
 
-class HNVMixin(object):
+class HNVMixin(common_db_mixin.CommonDbMixin,
+        extraroute_db.ExtraRoute_dbonly_mixin):
 
     @property
     def _admin_context(self):
@@ -181,8 +182,7 @@ class LoadBalancerManager(HNVMixin):
                 private_ip_address=ip["ip_address"],
                 private_ip_allocation_method="Static")
             LOG.debug("Creating FRONTEND IP config: %r" % fe.dump())
-            fe = fe.commit(wait=True)
-            ret.append(client.Resource(resource_ref=fe.resource_ref))
+            ret.append(fe)
         return ret
 
     def _create_load_balancer(self, port):
@@ -217,7 +217,8 @@ class LoadBalancerManager(HNVMixin):
             resource_id=resource_ids["lb-id"],
             outbound_nat_rules=[onat,],
             backend_address_pools=[be,],
-            frontend_ip_configurations=[fe,]).commit(wait=True)
+            frontend_ip_configurations=fe_ips)
+        lb.commit(wait=True)
         return client.LoadBalancers.get(resource_id=lb.resource_id)
 
     def _remove_load_balancer(self, port):
@@ -427,8 +428,6 @@ class PublicIPAddressManager(HNVMixin):
 """
 
 class HNVL3RouterPlugin(service_base.ServicePluginBase,
-                        common_db_mixin.CommonDbMixin,
-                        extraroute_db.ExtraRoute_dbonly_mixin,
                         HNVMixin):
 
     supported_extension_aliases = [
