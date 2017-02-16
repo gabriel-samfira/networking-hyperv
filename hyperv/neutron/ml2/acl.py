@@ -138,7 +138,7 @@ class HNVAclDriver(object):
         # TODO(gsamfira): Cache this value
         nc_acls = []
         # TODO: arbitrary number. Should turn into constant
-        if len(ids) < 3:
+        if ids and len(ids) < 3:
             for i in ids:
                 nc_acls.append(client.AccessControlLists.get(resource_id=i))
         else:
@@ -182,10 +182,10 @@ class HNVAclDriver(object):
         ignore = set(ignore_sgs)
         if not ports:
             tmp = self._driver._get_db_ports()
-            ports = ports["compute"]
+            ports = tmp["compute"]
         ret = {}
-        for port in ports:
-            sgs = set(port.get("security_groups", []))
+        for i in ports:
+            sgs = set(ports[i].get("security_groups", []))
             sgs = list(sgs - ignore)
             if len(sgs) < 2:
                 continue
@@ -232,7 +232,8 @@ class HNVAclDriver(object):
         ag_db_acls = self._get_aggregate_db_acls(db_acls)
 
         nc_rule_set = set(nc_acls.keys())
-        db_rule_set = set(db_acls.keys()) + set(ag_db_acls.keys())
+        db_rule_set = set(db_acls.keys())
+        db_rule_set.update(set(ag_db_acls.keys()))
 
         must_remove = list(nc_rule_set - db_rule_set)
         must_add = list(db_rule_set - nc_rule_set)

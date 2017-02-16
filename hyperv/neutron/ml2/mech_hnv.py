@@ -303,7 +303,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         self._public_ips.bulk_remove_by_id(vip_remove)
         self._public_ips.bulk_create(vip_to_add)
 
-        self._remove_nc_ports(c_remove)
+        for i in c_remove:
+            self._remove_nc_port(i)
         self._create_ports_in_nc(c_to_add)
         self._sync_db_ports(c_to_sync)
 
