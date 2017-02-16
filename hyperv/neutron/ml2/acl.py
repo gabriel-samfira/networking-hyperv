@@ -13,6 +13,7 @@
 #
 import json
 import netaddr
+import hashlib
 
 # from oslo_config import cfg
 from neutron import context as n_context
@@ -22,11 +23,9 @@ from requests.status_codes import codes
 from hyperv.common.utils import retry_on_http_error
 from oslo_log import log
 from hyperv.neutron import constants
-
+from neutron_lib import constants as const
 
 from hnv.common import exception as hnv_exception
-
-# CONF = cfg.CONF
 
 ACL_PROP_MAP = {
     'direction': {'ingress': "Inbound",
@@ -104,7 +103,7 @@ class HNVAclDriver(object):
         # for ACLs. Adding default rules to drop all traffic, with the highest
         # priority value that is user definable, to mimic DROP ALL policy.
         LOG.debug("Running _create_acls_and_rules")
-        for i in sgs.keys():
+        for i in sgs:
             default_rules = self._get_drop_all_rules()
             processed_rules = self._process_rules(sgs[i])
             default_rules.extend(processed_rules[i]["rules"])
@@ -123,13 +122,10 @@ class HNVAclDriver(object):
 
     def _apply_nc_acl_rules(self, acl, rules):
         # we are syncing and we want to overwrite any existing rule.
-        # removing the etag will ensure we will not get a 412 error
-        # in case the resource changed in the meantime.
         default_rules = self._get_drop_all_rules()
         rules.extend(default_rules)
-        #acl.etag = None
         acl.acl_rules = rules
-        acl.commit()
+        acl.commit(wait=False, if_match=None)
 
     def _sync_existing_sgs(self, db_sgs, nc_acls):
         for sg in db_sgs:
@@ -140,7 +136,13 @@ class HNVAclDriver(object):
 
     def _get_nc_acls(self, ids=None):
         # TODO(gsamfira): Cache this value
-        nc_acls = client.AccessControlLists.get()
+        nc_acls = []
+        # TODO: arbitrary number. Should turn into constant
+        if len(ids) < 3:
+            for i in ids:
+                nc_acls.append(client.AccessControlLists.get(resource_id=i))
+        else:
+            nc_acls = client.AccessControlLists.get()
         nc_acl_list = {}
         for i in nc_acls:
             if not i.tags or i.tags.get("provider") != constants.HNV_PROVIDER_NAME:
@@ -152,6 +154,21 @@ class HNVAclDriver(object):
                 nc_acl_list[i.resource_id] = i
         return nc_acl_list
 
+    def _get_aggregate_id(self, sg_ids):
+        if type(sg_ids) is not list:
+            sg_ids = [sg_ids,]
+        sg_ids.sort()
+        joined = "".join(sg_ids)
+        return hashlib.md5(joined).hexdigest()
+
+    def _get_port_acl(self, port):
+        sg_ids = port.get("security_groups", [])
+        if len(sg_ids) == 0:
+            return None
+        aggregate_id = self._get_aggregate_id(sg_ids)
+        acls = client.AccessControlLists.get(resource_id=aggregate_id)
+        return acls
+
     def _get_db_acls(self):
         db_sg_list = {}
         db_security_groups = self._plugin.get_security_groups(
@@ -161,12 +178,61 @@ class HNVAclDriver(object):
                 db_sg_list[i["id"]] = i["security_group_rules"]
         return db_sg_list
 
-    def sync_acls(self):
+    def _get_aggregate_db_acls(self, db_acls, ports=None, ignore_sgs=[]):
+        ignore = set(ignore_sgs)
+        if not ports:
+            tmp = self._driver._get_db_ports()
+            ports = ports["compute"]
+        ret = {}
+        for port in ports:
+            sgs = set(port.get("security_groups", []))
+            sgs = list(sgs - ignore)
+            if len(sgs) < 2:
+                continue
+            aggregate_id = self._get_aggregate_id(sgs)
+            if ret.get(aggregate_id):
+                continue
+            all_rules = []
+            for sg in sgs:
+                all_rules.extend(db_acls.get(sg, []))
+            ret[aggregate_id] = all_rules
+        return ret
+
+    # TODO: abstract this. It's similar to sync_acls
+    def _refresh_aggregate_acls(self, ports, departing_sgs=[]):
         nc_acls = self._get_nc_acls()
         db_acls = self._get_db_acls()
 
+        aggregate_db_acls = self._get_aggregate_db_acls(
+            db_acls, ports, ignore_sgs=departing_sgs)
+
         nc_rule_set = set(nc_acls.keys())
-        db_rule_set = set(db_acls.keys())
+        db_rule_set = set(aggregate_db_acls.keys())
+
+        must_add = list(db_rule_set - nc_rule_set)
+        sync = list(db_rule_set & nc_rule_set)
+
+        new_secgroups = {k: db_acls[k] for k in must_add}
+        sync_db_rules = {k: db_acls[k] for k in sync}
+        sync_nc_rules = {k: nc_acls[k] for k in sync}
+        
+        # sync existing security groups first. This will allow rules
+        # with remote_group_ids to pick up all members of that security group
+        self._sync_existing_sgs(sync_db_rules, sync_nc_rules)
+        # add new acls
+        self._create_acls_and_rules(new_secgroups)
+
+    def sync_acls(self):
+        nc_acls = self._get_nc_acls()
+        db_acls = self._get_db_acls()
+        # ACLs that need to be created in the network controller comprised
+        # of the rules from multiple security groups set on a port. It's an
+        # unfortunate limitation of HNV, that you are not allowed to add a
+        # list of ACLs on a given port. 
+        ag_db_acls = self._get_aggregate_db_acls(db_acls)
+
+        nc_rule_set = set(nc_acls.keys())
+        db_rule_set = set(db_acls.keys()) + set(ag_db_acls.keys())
 
         must_remove = list(nc_rule_set - db_rule_set)
         must_add = list(db_rule_set - nc_rule_set)
@@ -194,12 +260,18 @@ class HNVAclDriver(object):
                 outbound_action="Deny",
                 tags={"provider": constants.HNV_PROVIDER_NAME}).commit(wait=True)
         elif event == events.BEFORE_DELETE:
+            ports = self._plugin.get_ports(self.admin_context, filters={
+                "security_groups": [sg['id'],]
+                })
             try:
                 acl = client.AccessControlLists.get(
                     resource_id=sg['id'])
             except hnv_exception.NotFound:
                 return
             acl.remove(resource_id=acl.resource_id, wait=True)
+            # only really relevant on delete. When adding a new SG,
+            # it's not yet assigned to any VM
+            self._refresh_aggregate_acls(ports, departing_sgs=[sg["id"],])
         return
 
     def process_sg_rule_notification(self, event, **kwargs):
@@ -207,15 +279,21 @@ class HNVAclDriver(object):
             'sec_group': kwargs.get('security_group_rule_id'),
             })
         options = {}
+        sg = kwargs.get('security_group_rule')
+        sg_id = kwargs.get('security_group_rule_id')
         if event == events.AFTER_CREATE:
-            options["sg_rule"] = kwargs.get('security_group_rule')
+            options["sg_rule"] = sg
             options["sg_id"] = options["sg_rule"]['security_group_id']
             return self._create_acl_rule(**options)
         elif event == events.BEFORE_DELETE:
             options["sg_rule"] = self._plugin.get_security_group_rule(
-                self.admin_context, kwargs.get('security_group_rule_id'))
+                self.admin_context, sg_id)
             options["sg_id"] = options["sg_rule"]['security_group_id']
             return self._delete_acl_rule(**options)
+        ports = self._plugin.get_ports(self.admin_context, filters={
+            "security_groups": [sg_id,]})
+        self._refresh_aggregate_acls(ports)
+
 
     def _create_acl_rule(self, sg_rule, sg_id):
         try:
@@ -372,16 +450,25 @@ class HNVAclDriver(object):
         return ret
 
     def add_member_to_sgs(self, port):
+        updated_sgs = set()
         rules = self._get_sgs_member_rules_for_port(port)
         for i in rules:
-            i.commit(wait=True)
-        return
+            updated_sgs.add(i.parent_id)
+            i.commit(wait=False)
+        ports = self._plugin.get_ports(self.admin_context, filters={
+            "security_groups": list(updated_sgs)})
+        self._refresh_aggregate_acls(ports)
 
     # this should be called when a port is removed in neutron
     def remove_member_from_sg(self, port):
+        updated_sgs = set()
         rules = self._get_sgs_member_rules_for_port(port)
         for i in rules:
+            updated_sgs.add(i.parent_id)
             i.remove(resource_id=i.resource_id, parent_id=i.parent_id)
+        ports = self._plugin.get_ports(self.admin_context, filters={
+            "security_groups": list(updated_sgs)})
+        self._refresh_aggregate_acls(ports)
         return
 
     def _get_member_rules(self, rule, members, priority=DEFAULT_RULE_PRIORITY):

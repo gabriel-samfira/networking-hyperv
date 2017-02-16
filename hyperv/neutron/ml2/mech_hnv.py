@@ -976,7 +976,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         owner = port.get("device_owner")
         LOG.debug("ORIGINAL port: %r" % original_port)
         LOG.debug("NEW port: %r" % port)
-        if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX): 
+        if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
             members = self._get_port_member_ips(port)
             original_members = self._get_port_member_ips(original_port)
             if members != original_members:
@@ -1019,18 +1019,18 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             if manager:
                 manager.remove(port)
 
-    def _get_port_acl(self, port):
-        """
-        Apply ACL on port. ACL rules for remote groups are added on port create.
-        """
-        sg_ids = port.get("security_groups", [])
-        acls = self._acl_driver._get_nc_acls(ids=sg_ids)
-        ret = []
-        for i in acls.keys():
-            ret.append(client.Resource(resource_ref=acls[i].resource_ref))
-        #TODO(gsamfira): Merge all acls into one huge ACL.
-        #aparently, HNV only supports one ACL per port......
-        return (ret[0] if len(ret) > 0 else None)
+    # def _get_port_acl(self, port):
+    #     """
+    #     Apply ACL on port. ACL rules for remote groups are added on port create.
+    #     """
+    #     sg_ids = port.get("security_groups", [])
+    #     acls = self._acl_driver._get_nc_acls(ids=sg_ids)
+    #     ret = []
+    #     for i in acls.keys():
+    #         ret.append(client.Resource(resource_ref=acls[i].resource_ref))
+    #     #TODO(gsamfira): Merge all acls into one huge ACL.
+    #     #aparently, HNV only supports one ACL per port......
+    #     return (ret[0] if len(ret) > 0 else None)
 
     def _get_ip_resource_id(self, ip, port_id):
         address = ip.get("ip_address")
@@ -1077,7 +1077,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             if instance_id:
                 port[portbindings.VIF_DETAILS].update(
                     {constants.HNV_PORT_PROFILE_ID: instance_id})
-            return
+            return instance_id
         port_details = self.get_port_details(port)
         nc_port.update(port_details)
         nc_port.commit(wait=True)
@@ -1105,7 +1105,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         public_ip = self._public_ips.get_vip_for_internal_port(
             port, ip["ip_address"])
         backend_pools = self._lb_manager.get_port_backend_pool(port)
-        acl = self._get_port_acl(port)
+        acl = self._acl_driver._get_port_acl(port)
         subnet_id = ip.get("subnet_id")
         neutron_subnet = self._get_subnet_from_neutron(subnet_id)
         dns_nameservers = neutron_subnet.get("dns_nameservers", [])
