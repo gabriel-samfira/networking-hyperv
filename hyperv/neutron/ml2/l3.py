@@ -155,7 +155,6 @@ class LoadBalancerManager(HNVMixin):
                 subnet=ip_subnet,
                 private_ip_address=ip["ip_address"],
                 private_ip_allocation_method="Static")
-            LOG.debug("Creating FRONTEND IP config: %r" % fe.dump())
             ret.append(fe)
         return ret
 
@@ -252,7 +251,6 @@ class LoadBalancerManager(HNVMixin):
     def get_port_backend_pool(self, port):
         lbs = self._get_lb_for_port(port)
         ret = []
-        LOG.debug("FOUND LBS: %r" % lbs)
         for i in lbs:
             ret.append(client.Resource(
                 resource_ref=i.backend_address_pools[0].resource_ref))
@@ -472,7 +470,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                            events.AFTER_UPDATE)
 
     def process_floating_ip_update(self, resource, event, trigger, **kwargs):
-        LOG.debug("FLOATING DATA: %r >>>> %r >>>> %r >>>> %r" % (resource, event, trigger, kwargs))
         self._public_ip.update_vip_association(kwargs)
 
     def get_plugin_type(self):
@@ -547,11 +544,20 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         if external_port:
             router_interfaces = self._get_attached_router_interfaces(context, router_id)
             lb = self._get_lb_for_router(updated)
-            LOG.debug("ROUTER_INTERFACES: %r " % router_interfaces)
             self._apply_lb_on_connected_networks(router_interfaces, lb)
         return updated
 
     def add_router_interface(self, context, router_id, interface_info):
+        LOG.debug(">>>>>>>>> %r %r %r" % (context, router_id, interface_info))
+        interfaces = self._get_attached_router_interfaces(context, router_id)
+        subnet = self._plugin.get_subnet(self._admin_context, interface_info["subnet_id"])
+        for i in interfaces:
+            if subnet["network_id"] != i["network_id"]:
+                raise Exception("HNV does not support setting a load "
+                        "balancer on subnets from different virtual networks. "
+                        "Please create a new router if you need to offer outbound "
+                        "NAT functionality to your VMs. Currently attached network: %(attached_net)s" % {
+                            'attached_net': i["network_id"]})
         router_interface_info = \
             super(HNVL3RouterPlugin, self).add_router_interface(
                 context, router_id, interface_info)
@@ -565,19 +571,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         if not lb:
             return
         self._apply_lb_on_ip_configs(ip_configs, lb)
-        # for cfg in ip_configs:
-        #     # for some reason, the IPConfiguration resource does not allow
-        #     # PUT operations. We have to get the NetworkInterface object
-        #     # and update that.
-        #     ip = cfg.get_resource()
-        #     net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
-        #     for idx, i in enumerate(net_iface.ip_configurations):
-        #         if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
-        #             resource = client.Resource(
-        #                 resource_ref=lb.backend_address_pools[0].resource_ref)
-        #             net_iface.ip_configurations[idx].backend_address_pools.append(resource)
-        #             break
-        #     net_iface.commit(wait=False)
         return router_interface_info
 
     def remove_router_interface(self, context, router_id, interface_info):
@@ -612,7 +605,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                         new.append(backend)
                     net_iface.ip_configurations[idx].backend_address_pools = new
                     break
-            LOG.debug("NET_IFACE: %r" % net_iface.dump())
             net_iface.commit(wait=False)
         return router_interface_info
 

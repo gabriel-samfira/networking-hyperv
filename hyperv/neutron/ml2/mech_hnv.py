@@ -70,9 +70,11 @@ class HNVWorker(worker.NeutronWorker):
         # Sync networks
         self._driver._sync_networks()
         # Sync ACLs in network controller
-        self._driver._acl_driver.sync_acls()
+        remove_acls = self._driver._acl_driver.sync_acls()
         # sync ports
         self._driver._sync_ports()
+        #remove acls
+        self._driver._acl_driver._remove_acls(remove_acls)
 
     def stop(self):
         return
@@ -228,7 +230,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if type(ports) is not list:
             ports = [ports,]
         for port in ports:
-            LOG.debug("Syncing port %r" % port)
             self.update_port(port)
         return
 
@@ -261,7 +262,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 if not p_id:
                     continue
                 ports[section][p_id] = i
-        LOG.debug("FOUND DB ports: %r" % ports)
         return ports
 
     # TODO:
@@ -742,7 +742,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             subnet_id = i["id"]
             prefix = i["cidr"]
             pool_id = self._get_ip_pool_id(network.resource_id, subnet_id)
-            LOG.debug("Looking for %r in %r" % (subnet_id, network_subnets))
             if subnet_id not in network_subnets:
                 subnet = client.LogicalSubnetworks(
                     tags={"provider": constants.HNV_PROVIDER_NAME},
@@ -946,7 +945,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     )
             self._create_ports_in_nc(port)
         else:
-            LOG.debug("Creating port %r" % port)
             manager = l3.get_manager(port)
             if manager:
                 manager.create(port)
@@ -975,7 +973,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         port = context.current
         original_port = context.original
         owner = port.get("device_owner")
-        LOG.debug("ORIGINAL port: %r" % original_port)
         LOG.debug("NEW port: %r" % port)
         if owner.startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
             members = self._get_port_member_ips(port)
@@ -1081,7 +1078,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             return instance_id
         port_details = self.get_port_details(port)
         nc_port.update(port_details)
-        LOG.debug("NC PORT: %r" % nc_port.dump())
         nc_port.commit(wait=True)
         return nc_port.instance_id
 
@@ -1102,7 +1098,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
 
     def _get_nc_ip_configuration(self, ip, port, cached_subnets):
         network_id = port["network_id"]
-        LOG.debug("PORT_DETAILS: %r" % port)
         port_id = port["id"]
         public_ip = self._public_ips.get_vip_for_internal_port(
             port, ip["ip_address"])
