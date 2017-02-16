@@ -111,33 +111,6 @@ class HNVMixin(common_db_mixin.CommonDbMixin,
             ret.append(tmp)
         return ret
 
-    def _get_connected_interfaces(self, subnets):
-        ip_configurations = []
-        net_ids = [i["network_id"] for i in subnets]
-        virt_nets = self._get_virtual_networks(net_ids)
-        for net in virt_nets:
-            for sub in net.subnetworks:
-                details = {
-                    "network_id": sub.parent_id,
-                    "subnet_id": sub.resource_id
-                }
-                if details in subnets:
-                    for ip in sub.ip_configuration:
-                        ip_configurations.append(ip.get_resource())
-        # Unfortunately, calling PUT on an IP resource is not allowed (for some reason). To update the
-        # NAT load balancer, we need to update the IP configuration as part of the network interface
-        # and call PUT on the network interface itself
-        net_iface_ids = [i.parent_id for i in ip_configurations]
-        net_ifaces = self._get_network_interfaces(net_iface_ids)
-        ret = {}
-        for i in ip_configurations:
-            if not ret.get(i.parent_id):
-                ret[i.parent_id] = {
-                    "iface": net_ifaces[i.parent_id],
-                    "ip_configs": []}
-            ret[i.parent_id]["ip_configs"].append(i.resource_id)
-        return ret
-
 
 class LoadBalancerManager(HNVMixin):
 
@@ -521,6 +494,33 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                     ret.append(ip_conf)
         return ret
 
+    def _get_ip_configs_from_subnets(self, subnets):
+        ip_configurations = []
+        net_ids = [i["network_id"] for i in subnets]
+        virt_nets = self._get_virtual_networks(net_ids)
+        for net in virt_nets:
+            for sub in net.subnetworks:
+                details = {
+                    "network_id": sub.parent_id,
+                    "subnet_id": sub.resource_id
+                }
+                if details in subnets:
+                    for ip in sub.ip_configuration:
+                        ip_configurations.append(ip)
+        return ip_configurations
+
+    def _apply_lb_on_ip_configs(self, ip_configs, lb):
+        for cfg in ip_configs:
+            ip = cfg.get_resource()
+            net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
+            for idx, i in enumerate(net_iface.ip_configurations):
+                if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
+                    resource = client.Resource(
+                        resource_ref=lb.backend_address_pools[0].resource_ref)
+                    net_iface.ip_configurations[idx].backend_address_pools.append(resource)
+                    break
+            net_iface.commit(wait=True)
+
     def _apply_lb_on_connected_networks(self, router_interfaces, lb):
         subnets = []
         for i in router_interfaces:
@@ -529,37 +529,8 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                 if j in subnets:
                     continue
                 subnets.append(j)
-        net_ifaces = self._get_connected_interfaces(subnets)
-        be_resource = client.Resource(
-                resource_ref=lb.backend_address_pools[0].resource_ref)
-        for i in net_ifaces:
-            iface = net_ifaces[i]["iface"]
-            for idx, ip in enumerate(iface.ip_configurations):
-                if ip.resource_id in net_ifaces[i]["ip_configs"]:
-                    iface.ip_configurations[idx].backend_address_pools.append(be_resource)
-            iface.commit(wait=True)
-
-    #def _clear_lb_from_connected_networks(self, router_interfaces, lb):
-    #    subnets = []
-    #    for i in router_interfaces:
-    #        info = self._get_subnet_info_from_interface(i)
-    #        for j in info:
-    #            if j in subnets:
-    #                continue
-    #            subnets.append(j)
-    #    net_ifaces = self._get_connected_interfaces(subnets)
-    #    be_resource = lb.backend_address_pools[0].resource_ref
-    #    for i in net_ifaces:
-    #        iface = net_ifaces[i]["iface"]
-    #        for idx, ip in enumerate(iface.ip_configurations):
-    #            if ip.resource_id in net_ifaces[i]["ip_configs"]:
-    #                new_be = []
-    #                for backend in iface.ip_configurations[idx].backend_address_pools:
-    #                    if backend.resource_ref == be_resource:
-    #                        continue
-    #                    new_be.append(backend)
-    #                iface.ip_configurations[idx].backend_address_pools = new_be
-    #        iface.commit(wait=True)
+        ip_configs = self._get_ip_configs_from_subnets(subnets)
+        self._apply_lb_on_ip_configs(ip_configs, lb)
 
     def update_router(self, context, id, router):
         original_router = self.get_router(context, id)
@@ -593,19 +564,20 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         lb = self._get_lb_for_router_by_id(router_id)
         if not lb:
             return
-        for cfg in ip_configs:
-            # for some reason, the IPConfiguration resource does not allow
-            # PUT operations. We have to get the NetworkInterface object
-            # and update that.
-            ip = cfg.get_resource()
-            net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
-            for idx, i in enumerate(net_iface.ip_configurations):
-                if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
-                    resource = client.Resource(
-                        resource_ref=lb.backend_address_pools[0].resource_ref)
-                    net_iface.ip_configurations[idx].backend_address_pools.append(resource)
-                    break
-            net_iface.commit(wait=False)
+        self._apply_lb_on_ip_configs(ip_configs, lb)
+        # for cfg in ip_configs:
+        #     # for some reason, the IPConfiguration resource does not allow
+        #     # PUT operations. We have to get the NetworkInterface object
+        #     # and update that.
+        #     ip = cfg.get_resource()
+        #     net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
+        #     for idx, i in enumerate(net_iface.ip_configurations):
+        #         if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
+        #             resource = client.Resource(
+        #                 resource_ref=lb.backend_address_pools[0].resource_ref)
+        #             net_iface.ip_configurations[idx].backend_address_pools.append(resource)
+        #             break
+        #     net_iface.commit(wait=False)
         return router_interface_info
 
     def remove_router_interface(self, context, router_id, interface_info):
