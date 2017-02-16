@@ -68,7 +68,7 @@ class HNVMixin(common_db_mixin.CommonDbMixin,
     def _get_lb_for_router(self, router):
         ext_port_id = router.get("gw_port_id")
         if not ext_port_id:
-            LOG.debug("Router %s has no external network set. Nothing to do here" % router_id)
+            LOG.debug("Router %s has no external network set. Nothing to do here" % router["id"])
             return
 
         ext_port = self._plugin.get_port(self._admin_context, ext_port_id)
@@ -219,8 +219,8 @@ class LoadBalancerManager(HNVMixin):
             outbound_nat_rules=[onat,],
             backend_address_pools=[be,],
             frontend_ip_configurations=fe_ips)
-        lb.commit(wait=True)
-        return client.LoadBalancers.get(resource_id=lb.resource_id)
+        return lb.commit(wait=True)
+        #return client.LoadBalancers.get(resource_id=lb.resource_id)
 
     def _remove_load_balancer_by_id(self, lb_id):
         client.LoadBalancers.remove(resource_id=lb_id)
@@ -255,6 +255,8 @@ class LoadBalancerManager(HNVMixin):
             for r_int in router_int:
                 router_id = r_int["device_id"]
                 lb = self._get_lb_for_router_by_id(router_id)
+                if not lb:
+                    continue
                 self._subnet_lb_cache[k] = lb
                 ret.append(lb)
         return ret
@@ -277,8 +279,10 @@ class LoadBalancerManager(HNVMixin):
     def get_port_backend_pool(self, port):
         lbs = self._get_lb_for_port(port)
         ret = []
+        LOG.debug("FOUND LBS: %r" % lbs)
         for i in lbs:
-            ret.append(i.backend_address_pools[0])
+            ret.append(client.Resource(
+                resource_ref=i.backend_address_pools[0].resource_ref))
         return ret
 
     @classmethod
@@ -572,6 +576,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         if external_port:
             router_interfaces = self._get_attached_router_interfaces(context, router_id)
             lb = self._get_lb_for_router(updated)
+            LOG.debug("ROUTER_INTERFACES: %r " % router_interfaces)
             self._apply_lb_on_connected_networks(router_interfaces, lb)
         return updated
 

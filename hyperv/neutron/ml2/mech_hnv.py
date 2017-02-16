@@ -1081,6 +1081,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             return instance_id
         port_details = self.get_port_details(port)
         nc_port.update(port_details)
+        LOG.debug("NC PORT: %r" % nc_port.dump())
         nc_port.commit(wait=True)
         return nc_port.instance_id
 
@@ -1121,6 +1122,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         subnet_resource = client.Resource(resource_ref=subnet_obj.resource_ref)
         ipConfiguration = client.IPConfiguration(
                     resource_id=resource_id,
+                    parent_id=port["id"],
                     private_ip_address=ip["ip_address"],
                     private_ip_allocation_method=constants.HNV_METHOD_STATIC,
                     public_ip_address=public_ip,

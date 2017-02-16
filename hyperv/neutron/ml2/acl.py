@@ -165,9 +165,12 @@ class HNVAclDriver(object):
         sg_ids = port.get("security_groups", [])
         if len(sg_ids) == 0:
             return None
+        elif len(sg_ids) == 1:
+            acl = client.AccessControlLists(resource_id=sg_ids[0])
+            return client.Resource(resource_ref=acl.resource_ref)
         aggregate_id = self._get_aggregate_id(sg_ids)
-        acls = client.AccessControlLists.get(resource_id=aggregate_id)
-        return acls
+        acls = client.AccessControlLists(resource_id=aggregate_id)
+        return client.Resource(resource_ref=acls.resource_ref)
 
     def _get_db_acls(self):
         db_sg_list = {}
@@ -196,6 +199,7 @@ class HNVAclDriver(object):
             for sg in sgs:
                 all_rules.extend(db_acls.get(sg, []))
             ret[aggregate_id] = all_rules
+        LOG.debug("AGGREGATE: %r" % ret)
         return ret
 
     # TODO: abstract this. It's similar to sync_acls
