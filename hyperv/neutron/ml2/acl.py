@@ -127,13 +127,10 @@ class HNVAclDriver(object):
         acl.commit(wait=False, if_match=None)
 
     def _sync_existing_sgs(self, db_sgs, nc_acls):
-        LOG.debug("DB_SGS %r" % db_sgs)
-        LOG.debug("NC_SGS %r" % nc_acls)
         for sg in db_sgs:
             LOG.debug("Syncing security group %(security_group)s" % {
                 'security_group': sg})
             rules = self._process_rules(db_sgs[sg])
-            LOG.debug("PROCESSED: %r" % rules)
             self._apply_nc_acl_rules(nc_acls[sg], rules[sg]["rules"])
 
     def _get_nc_acls(self, ids=None):
@@ -183,7 +180,8 @@ class HNVAclDriver(object):
                 db_sg_list[i["id"]] = i["security_group_rules"]
         return db_sg_list
 
-    def _get_aggregate_db_acls(self, db_acls, ports=None, ignore_sgs=[]):
+    def _get_aggregate_db_acls(self, db_acls, ports=None, ignore_sgs=None):
+        ignore_sgs = ignore_sgs or []
         ignore = set(ignore_sgs)
         if not ports:
             tmp = self._driver._get_db_ports()
@@ -208,40 +206,15 @@ class HNVAclDriver(object):
             ret[aggregate_id] = tmp
         return ret
 
-    # TODO: abstract this. It's similar to sync_acls
-    def _refresh_aggregate_acls(self, ports, departing_sgs=[]):
-        nc_acls = self._get_nc_acls()
-        db_acls = self._get_db_acls()
-
-        aggregate_db_acls = self._get_aggregate_db_acls(
-            db_acls, ports, ignore_sgs=departing_sgs)
-
-        db_acls.update(aggregate_db_acls)
-
-        nc_rule_set = set(nc_acls.keys())
-        db_rule_set = set(aggregate_db_acls.keys())
-
-        must_add = list(db_rule_set - nc_rule_set)
-        sync = list(db_rule_set & nc_rule_set)
-
-        new_secgroups = {k: db_acls[k] for k in must_add}
-        sync_db_rules = {k: db_acls[k] for k in sync}
-        sync_nc_rules = {k: nc_acls[k] for k in sync}
-        
-        # sync existing security groups first. This will allow rules
-        # with remote_group_ids to pick up all members of that security group
-        self._sync_existing_sgs(sync_db_rules, sync_nc_rules)
-        # add new acls
-        self._create_acls_and_rules(new_secgroups)
-
-    def sync_acls(self):
+    def sync_acls(self, ports=None, departing_sgs=None):
         nc_acls = self._get_nc_acls()
         db_acls = self._get_db_acls()
         # ACLs that need to be created in the network controller comprised
         # of the rules from multiple security groups set on a port. It's an
         # unfortunate limitation of HNV, that you are not allowed to add a
         # list of ACLs on a given port. 
-        ag_db_acls = self._get_aggregate_db_acls(db_acls)
+        ag_db_acls = self._get_aggregate_db_acls(
+                db_acls, ports=ports, ignore_sgs=departing_sgs)
         db_acls.update(ag_db_acls)
         nc_rule_set = set(nc_acls.keys())
         db_rule_set = set(db_acls.keys())
@@ -250,15 +223,12 @@ class HNVAclDriver(object):
         must_remove = list(nc_rule_set - db_rule_set)
         must_add = list(db_rule_set - nc_rule_set)
         sync = list(db_rule_set & nc_rule_set)
-        LOG.debug("SYNC_LIST %r" % list(sync))
         
         new_secgroups = {k: db_acls[k] for k in must_add}
         sync_db_rules = {k: db_acls[k] for k in sync}
         sync_nc_rules = {k: nc_acls[k] for k in sync}
         # sync existing security groups first. This will allow rules
         # with remote_group_ids to pick up all members of that security group
-        LOG.debug("SYNC_DB_RULES %r" % sync_db_rules)
-        LOG.debug("SYNC_NC_RULES %r" % sync_nc_rules)
         self._sync_existing_sgs(sync_db_rules, sync_nc_rules)
         # add new acls
         self._create_acls_and_rules(new_secgroups)
@@ -277,7 +247,6 @@ class HNVAclDriver(object):
                 outbound_action="Deny",
                 tags={"provider": constants.HNV_PROVIDER_NAME}).commit(wait=True)
         elif event == events.BEFORE_DELETE:
-            LOG.debug("SG INFO: %r" % sg)
             ports = self._get_ports_with_secgroups([sg['id'],])
             try:
                 acl = client.AccessControlLists.get(
@@ -287,29 +256,25 @@ class HNVAclDriver(object):
             acl.remove(resource_id=acl.resource_id, wait=True)
             # only really relevant on delete. When adding a new SG,
             # it's not yet assigned to any VM
-            self._refresh_aggregate_acls(ports, departing_sgs=[sg["id"],])
+            self.sync_acls(ports=ports, departing_sgs=[sg["id"],])
         return
 
     def _get_ports_with_secgroups(self, sg_ids):
         if type(sg_ids) is not list:
             sg_ids = [sg_ids,]
-        LOG.debug("GOT SGIDS %r" % sg_ids)
         p_binding = self._plugin._get_port_security_group_bindings(
                 self.admin_context, filters = {
                     'security_group_id': sg_ids},
                 fields=["port_id"])
-        LOG.debug("GOT P_BINDINGS %r" % p_binding)
         if len(p_binding) == 0:
             return {}
         port_ids = [i["port_id"] for i in p_binding]
-        LOG.debug("FOUND PORT IDS %r" % port_ids)
         ports = []
         for i in port_ids:
             p = self._plugin.get_port(self.admin_context, i)
             ports.append(p)
         #ports = self._plugin.get_ports(self.admin_context, filters={
         #    "id": [port_ids,]})
-        LOG.debug("Found ports %r" % ports)
         return {i["id"]:i for i in ports}
 
     def process_sg_rule_notification(self, event, **kwargs):
@@ -317,22 +282,16 @@ class HNVAclDriver(object):
             'sec_group': kwargs.get('security_group_rule_id'),
             })
         options = {}
-        sg = kwargs.get('security_group_rule')
         sg_id = None
         if event == events.AFTER_CREATE:
-            options["sg_rule"] = sg
+            options["sg_rule"] = kwargs.get('security_group_rule')
             options["sg_id"] = options["sg_rule"]['security_group_id']
             sg_id = options["sg_id"]
-            self._create_acl_rule(**options)
-        elif event == events.BEFORE_DELETE:
-            options["sg_rule"] = self._plugin.get_security_group_rule(
-                self.admin_context, sg_id)
-            options["sg_id"] = options["sg_rule"]['security_group_id']
-            sg_id = options["sg_id"]
-            self._delete_acl_rule(**options)
+        elif event == events.AFTER_DELETE:
+            sg_id = kwargs["security_group_id"]
         ports = self._get_ports_with_secgroups([sg_id,]) 
-        self._refresh_aggregate_acls(ports)
-
+        to_remove = self.sync_acls(ports=ports)
+        self._remove_acls(to_remove)
 
     def _create_acl_rule(self, sg_rule, sg_id):
         try:
@@ -357,15 +316,14 @@ class HNVAclDriver(object):
             existing_rules.commit(wait=True)
 
     def _delete_acl_rule(self, sg_rule, sg_id):
-        remote_group = sg_rule.get(remote_group_id, None)
+        remote_group = sg_rule.get("remote_group_id", None)
         if remote_group:
             member_ips = self._get_member_ips()
             rules = self._get_member_rules(sg_rule, member_ips.get(remote_group, []))
-            for rule in rules:
-                rule.remove(resource_id=rule.resource_id, parent_id=rule.parent_id)
+            self._remove_acl_rules(rules)
         else:
-            client.ACLRules.remove(
-                resource_id=sg_rule["id"], parent_id=sg_id, wait=True)
+            rules = self._process_rules(sg_rule)
+            self._remove_acl_rules(rules[sg_id]["rules"])
 
     # def _get_ip_configs(self):
     #     ip_configs = {}
@@ -385,9 +343,7 @@ class HNVAclDriver(object):
 
     def _get_member_ips(self):
         db_ports = self._driver._get_db_ports()
-        LOG.debug("PORTS FOR MEMBERS %r" % db_ports)
         members = self._driver._get_port_member_ips(db_ports["compute"].values())
-        LOG.debug("MEMBERS: %r" % members)
         return members
 
     # def _get_sg_members(self, sg_id, ip_config_cache):
@@ -452,8 +408,8 @@ class HNVAclDriver(object):
             destination_prefix = ACL_PROP_MAP["default"]
             source_prefix = self._sanitize_remote_ip_prefix(
                     rule["remote_ip_prefix"], rule["ethertype"])
-            destination_port_range = ACL_PROP_MAP["default"]
-            source_port_range = self._sanitize_port(rule)
+            destination_port_range = self._sanitize_port(rule) #ACL_PROP_MAP["default"]
+            source_port_range = ACL_PROP_MAP["default"] #self._sanitize_port(rule)
 
         security_group_id = rule["security_group_id"]
         rule_id = rule["id"]
@@ -496,13 +452,11 @@ class HNVAclDriver(object):
             updated_sgs.add(i.parent_id)
             i.commit(wait=False)
         ports = self._get_ports_with_secgroups(list(updated_sgs))
-        self._refresh_aggregate_acls(ports)
+        self.sync_acls(ports=ports)
 
-    # this should be called when a port is removed in neutron
-    def remove_member_from_sg(self, port):
-        updated_sgs = set()
-        rules = self._get_sgs_member_rules_for_port(port)
+    def _remove_acl_rules(self, rules):
         acls = {}
+        updated_sgs = set()
         # You can't call remove() on a rule directly, because the HNV API,
         # for whatever reason complains about the ACL being used. You can however,
         # overwrite all the rules in an ACL by calling commit()...
@@ -522,11 +476,17 @@ class HNVAclDriver(object):
                 if rule.resource_ref in acls[acl]["rules"]:
                     continue
                 new.append(rule)
-            acls[acl]["acl"].acl_rules = new
-            acls[acl]["acl"].commit(wait=True)
+            acl = client.AccessControlLists.get(resource_id=acls[acl]["acl"].resource_id)
+            acl.acl_rules = new
+            acl.commit(wait=True)
         ports = self._get_ports_with_secgroups(list(updated_sgs))
-        self._refresh_aggregate_acls(ports)
+        self.sync_acls(ports=ports)
         return
+
+    # this should be called when a port is removed in neutron
+    def remove_member_from_sg(self, port):
+        rules = self._get_sgs_member_rules_for_port(port)
+        self._remove_acl_rules(rules)
 
     def _get_member_rules(self, rule, members, priority=DEFAULT_RULE_PRIORITY):
         rules = []

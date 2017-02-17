@@ -164,7 +164,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                                events.AFTER_CREATE)
             registry.subscribe(self.process_sg_rule_notification,
                                resources.SECURITY_GROUP_RULE,
-                               events.BEFORE_DELETE)
+                               events.AFTER_DELETE)
 
     def process_sg_notification(self, resource, event, trigger, **kwargs):
         self._acl_driver.process_sg_notification(event, **kwargs)
