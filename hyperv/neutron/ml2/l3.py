@@ -548,7 +548,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         return updated
 
     def add_router_interface(self, context, router_id, interface_info):
-        LOG.debug(">>>>>>>>> %r %r %r" % (context, router_id, interface_info))
         interfaces = self._get_attached_router_interfaces(context, router_id)
         subnet = self._plugin.get_subnet(self._admin_context, interface_info["subnet_id"])
         for i in interfaces:

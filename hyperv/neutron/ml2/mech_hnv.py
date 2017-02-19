@@ -264,15 +264,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 ports[section][p_id] = i
         return ports
 
-    # TODO:
-    # create onat rule for network:router_gateway port
-    # sync router ports
-    # create floating ips
-    # sync logical networks and subnets
-    # create combined ACLs
-    # get all networks attached to a router
-    # for each virtual network attached to the router, get all
-    # network interfaces and apply outbound nat rules if a gateway is set
     def _sync_ports(self):
         nc_ports = self._get_nc_ports()
         nc_lbs = l3.LoadBalancerManager.get_all()
@@ -345,6 +336,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         return ret
 
     def _remove_nc_virtual_netowrk(self, network_id):
+        LOG.debug("Removing network %(network_id)s" % {
+            'network_id': network_id,
+            })
         client.VirtualNetworks.remove(resource_id=network_id)
 
     def _remove_nc_logical_network(self, network_id):
@@ -605,8 +599,9 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         state or state changes that it does not know or care about.
         """
         segments = context.network_segments
+        network = context.current
         for segment in segments:
-            self._validate_segments(segment)
+            self._validate_segments(network, segment)
 
     def update_network_postcommit(self, context):
         """Update a network.
@@ -713,6 +708,28 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         network = network.commit(wait=True)
         return network
 
+    def _update_virtual_subnet(self, network, subnet):
+        # HNV does not allow setting dns_servers on virtual networks
+        # or subnets. We fake it by adding these settings directly on
+        # ports connected to the network. Lousy part is, we need to
+        # do this for all ports every time the subnet gets updated
+        # C_U
+        admin_context = n_context.get_admin_context()
+        net_id = network["id"]
+        subnet_id = subnet["id"]
+        filters = {
+                "network_id": [net_id]
+            }
+        to_update = []
+        ports = self._plugin.get_ports(admin_context, filters=filters)
+        for port in ports:
+            fixed_ips = port.get("fixed_ips", [])
+            for ip in fixed_ips:
+                if subnet_id == ip.get("subnet_id"):
+                    to_update.append(port)
+        if len(to_update):
+            self._sync_db_ports(port)
+
     def _get_ip_pool_id(self, net_id, subnet_id):
         joined = "%s%s" % (net_id, subnet_id)
         return hashlib.md5(joined).hexdigest()
@@ -742,33 +759,33 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             subnet_id = i["id"]
             prefix = i["cidr"]
             pool_id = self._get_ip_pool_id(network.resource_id, subnet_id)
-            if subnet_id not in network_subnets:
-                subnet = client.LogicalSubnetworks(
-                    tags={"provider": constants.HNV_PROVIDER_NAME},
-                    resource_id=subnet_id,
-                    parent_id=network.resource_id,
-                    address_prefix=prefix,
-                    vlan_id=network.tags["vlan_id"],
-                    dns_servers=dns_nameservers,
-                    is_public=True,
-                    default_gateways=[gateway,]).commit(wait=True)
+        #    if subnet_id not in network_subnets:
+            subnet = client.LogicalSubnetworks(
+                tags={"provider": constants.HNV_PROVIDER_NAME},
+                resource_id=subnet_id,
+                parent_id=network.resource_id,
+                address_prefix=prefix,
+                vlan_id=network.tags["vlan_id"],
+                dns_servers=dns_nameservers,
+                is_public=True,
+                default_gateways=[gateway,]).commit(wait=True)
                 #network.subnetworks.append(subnet)
                 #network = network.commit(wait=True)
-            if pool_id not in ip_pools:
-                ip_pool = client.IPPools(
-                    tags={"provider": constants.HNV_PROVIDER_NAME},
-                    resource_id=pool_id,
-                    parent_id=subnet.resource_id,
-                    grandparent_id=network.resource_id,
-                    start_ip_address=startIp,
-                    end_ip_address=endIp).commit(wait=True)
-                pool_resource  = client.Resource(resource_ref=ip_pool.resource_ref)
-                found = False
-                for vip_pool in lb_manager.vip_ip_pools:
-                    if vip_pool.resource_ref == ip_pool.resource_ref:
-                        found = True
-                if not found:
-                    lb_manager.vip_ip_pools.append(pool_resource)
+           # if pool_id not in ip_pools:
+            ip_pool = client.IPPools(
+                tags={"provider": constants.HNV_PROVIDER_NAME},
+                resource_id=pool_id,
+                parent_id=subnet.resource_id,
+                grandparent_id=network.resource_id,
+                start_ip_address=startIp,
+                end_ip_address=endIp).commit(wait=True)
+            pool_resource  = client.Resource(resource_ref=ip_pool.resource_ref)
+            found = False
+            for vip_pool in lb_manager.vip_ip_pools:
+                if vip_pool.resource_ref == ip_pool.resource_ref:
+                    found = True
+            if not found:
+                lb_manager.vip_ip_pools.append(pool_resource)
         network = client.LogicalNetworks.get(resource_id=network.resource_id)
         lb_manager.commit(wait=True)
         return network
@@ -836,7 +853,17 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         subnet state.  It is up to the mechanism driver to ignore
         state or state changes that it does not know or care about.
         """
-        pass
+        subnet = context.current
+        network = context.network.current
+        if network.get(EXTERNAL):
+            # as opposed to virtual networks, logical networks, which we use for
+            # floating ips (VIP in HNV) does allow setting both gateways and allocation
+            # pools. They are also of type VLAN. If no VLAN tag is required, the value
+            # should be set to 0, essentially turning it into a flat network
+            ln = client.LogicalNetworks.get(resource_id=network["id"])
+            self._add_subnets_to_logical_network(ln, subnet)
+        else:
+            self._update_virtual_subnet(network, subnet)
 
     def delete_subnet_precommit(self, context):
         """Delete resources for a subnet.
