@@ -124,7 +124,7 @@ class HNVAclDriver(object):
         default_rules = self._get_drop_all_rules()
         rules.extend(default_rules)
         acl.acl_rules = rules
-        acl.commit(wait=False, if_match=None)
+        acl.commit(wait=True, if_match=None)
 
     def _sync_existing_sgs(self, db_sgs, nc_acls):
         for sg in db_sgs:

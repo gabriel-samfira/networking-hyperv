@@ -16,6 +16,7 @@ from neutron import context as n_context
 from neutron.callbacks import registry
 from neutron.callbacks import resources
 from neutron.callbacks import events
+from neutron.plugins.ml2 import plugin as ml2_plugin
 
 from neutron.services import service_base
 from neutron.db import common_db_mixin
@@ -51,6 +52,15 @@ class HNVMixin(common_db_mixin.CommonDbMixin,
             return plugin_property
         self._plugin_property = directory.get_plugin()
         return self._plugin_property
+
+    @property
+    def _driver(self):
+        if self._driver_property is None:
+            plugin = directory.get_plugin()
+            if isinstance(plugin, ml2_plugin.Ml2Plugin):
+                self._driver_property = \
+                    plugin.mechanism_manager.mech_drivers['hnv'].obj
+        return self._driver_property
 
     def _get_lnsubnet_for_ip(self, ip):
         subnet_id = ip["subnet_id"]
@@ -421,8 +431,10 @@ class PublicIPAddressManager(HNVMixin):
         dip = assoc_data["fixed_ip_address"]
         net_adapter_id = assoc_data["fixed_port_id"]
         if dip and net_adapter_id:
-            return obj._associate_public_ip(assoc_data)
-        return obj._disassociate_public_ip(assoc_data)
+            obj._associate_public_ip(assoc_data)
+            return True
+        obj._disassociate_public_ip(assoc_data)
+        return False
 
     @classmethod
     def bulk_create(cls, ports):
@@ -470,7 +482,14 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                            events.AFTER_UPDATE)
 
     def process_floating_ip_update(self, resource, event, trigger, **kwargs):
-        self._public_ip.update_vip_association(kwargs)
+        fip = kwargs["floating_ip_id"]
+        is_up = self._public_ip.update_vip_association(kwargs)
+        if is_up:
+            status = const.FLOATINGIP_STATUS_ACTIVE
+        else:
+            status = const.FLOATINGIP_STATUS_DOWN
+        LOG.debug("Setting floating IP status to %s on %s" % (status, fip))
+        self.update_floatingip_status(self._admin_context, fip, status)
 
     def get_plugin_type(self):
         return n_const.L3_ROUTER_NAT

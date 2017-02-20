@@ -172,8 +172,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     def process_sg_rule_notification(self, resource, event, trigger, **kwargs):
         self._acl_driver.process_sg_rule_notification(event, **kwargs)
 
+    #def set_port_status_up(self, port):
+    #    pass
+
+    #def set_port_status_down(self, port_id):
+    #    pass
+
     def _remove_nc_port(self, port):
-        client.NetworkInterfaces.remove(resource_id=port)
+        client.NetworkInterfaces.remove(resource_id=port, wait=True)
 
     def _remove_nc_ports(self, ports):
         if type(ports) is not list:
@@ -454,10 +460,11 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             supported = self._supported_external_network_types
         return net_type in supported
 
-    def _insert_provisioning_block(self, context):
+    def _insert_provisioning_block(self, context, port=None):
         # we insert a status barrier to prevent the port from transitioning
         # to active until the agent reports back that the wiring is done
-        port = context.current
+        if port is None:
+            port = context.current
         if not context.host or port['status'] == const.PORT_STATUS_ACTIVE:
             # no point in putting in a block if the status is already ACTIVE
             return
@@ -1184,7 +1191,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             'payload': networkInterface,
             })
         try:
-            networkInterface = networkInterface.commit(wait=False)
+            networkInterface = networkInterface.commit(wait=True)
         except Exception as err:
             LOG.debug("Got error %r" % err.response.content)
             raise err
