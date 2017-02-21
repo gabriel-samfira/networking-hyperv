@@ -1,4 +1,5 @@
 import netaddr
+from uuid import UUID
 
 from oslo_log import log
 
@@ -168,6 +169,14 @@ class LoadBalancerManager(HNVMixin):
             ret.append(fe)
         return ret
 
+    def _debug_public_ip_allocation(self, port):
+        net_id = port.get("network_id")
+        fixed_ips = port.get("fixed_ips")
+        try:
+            ln = client.LogicalNetworks.get(resource_id=net_id)
+        except Exception as err:
+            LOG.debug("Failed to get logical network for net_id: %r" % net_id)
+
     def _create_load_balancer(self, port):
         resource_ids = self._get_resource_ids(port)
         try:
@@ -201,7 +210,13 @@ class LoadBalancerManager(HNVMixin):
             outbound_nat_rules=[onat,],
             backend_address_pools=[be,],
             frontend_ip_configurations=fe_ips)
-        return lb.commit(wait=True)
+        LOG.debug("Creating new load balancer with payload %r" % lb.dump())
+        try:
+            lb = lb.commit(wait=True)
+            return lb
+        except Exception as err:
+            LOG.error("Failed to create load balancer: %r" % lb.dump())
+            raise err
         #return client.LoadBalancers.get(resource_id=lb.resource_id)
 
     def _remove_load_balancer_by_id(self, lb_id):
@@ -270,12 +285,29 @@ class LoadBalancerManager(HNVMixin):
     def bulk_create(cls, ports):
         obj = cls()
         for port in ports:
-            obj._create_load_balancer(port)
+            retry = 3
+            while True:
+                try:
+                    obj._create_load_balancer(port)
+                    break
+                except Exception as err:
+                    if retry < 1:
+                        raise err
+                    retry = retry - 1
+                    obj._remove_load_balancer(port)
 
     @classmethod
     def create(cls, port):
         obj = cls()
-        return obj._create_load_balancer(port)
+        retry = 3
+        while True:
+            try:
+                return obj._create_load_balancer(port)
+            except Exception as err:
+                if retry < 1:
+                    raise err
+                retry = retry - 1
+                obj._remove_load_balancer(port)
         
     @classmethod
     def remove(cls, port):
@@ -322,12 +354,19 @@ class PublicIPAddressManager(HNVMixin):
         if not subnet:
             raise Exception("Failed to find subnet for ip %(ip)s in "
                 "network controller" % {"ip": ip["ip_address"]})
-        public_ip = client.PublicIPAddresses(
-            tags={"provider": constants.HNV_PROVIDER_NAME},
-            resource_id=vip_id,
-            ip_address=ips[0]["ip_address"],
-            allocation_method="Static",
-            idle_timeout=4).commit(wait=True)
+        public_ip=None
+        try:
+            public_ip = client.PublicIPAddresses(
+                tags={"provider": constants.HNV_PROVIDER_NAME},
+                resource_id=vip_id,
+                ip_address=ips[0]["ip_address"],
+                allocation_method="Static",
+                idle_timeout=4)
+            LOG.debug("Creating public ip with payload: %r" % public_ip.dump())
+            public_ip = public_ip.commit(wait=True)
+        except Exception as err:
+            LOG.error("Failed to create public IP: %r" % public_ip.dump())
+            raise err
         return public_ip
 
     def _delete_by_id(self, vip_id, fixed_ips=None):
@@ -444,8 +483,24 @@ class PublicIPAddressManager(HNVMixin):
 
     @classmethod
     def create(cls, port):
+        device_id = port.get("device_id")
+        try:
+            UUID(device_id, version=4)
+        except:
+            LOG.debug("Device ID for floating IP port is not a valid UUID %r "
+                    "Skipping VIP creation" % device_id)
+            return
         obj = cls()
-        return obj._create(port)
+        retry = 3
+        while True:
+            try:
+                obj._create(port)
+                return
+            except Exception as err:
+                if retry < 1:
+                    raise err
+                retry = retry - 1
+                obj._delete(port)
 
     @classmethod
     def remove(cls, port):
@@ -623,6 +678,6 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                         new.append(backend)
                     net_iface.ip_configurations[idx].backend_address_pools = new
                     break
-            net_iface.commit(wait=False)
+            net_iface.commit(wait=True)
         return router_interface_info
 

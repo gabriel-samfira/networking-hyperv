@@ -61,6 +61,17 @@ class HNVAclDriver(object):
         # self._security_groups = {}
 
     def _remove_acl(self, acl_id):
+        try:
+            acl = client.AccessControlLists.get(resource_id=acl_id)
+        except hnv_exception.NotFound:
+            return
+        for i in acl.ip_configuration:
+            ip_conf = i.get_resource()
+            net_iface = client.NetworkInterfaces.get(resource_id=ip_conf.parent_id)
+            for idx, ip_conf in enumerate(net_iface.ip_configurations):
+                if acl.resource_ref == ip_conf.access_controll_list.resource_ref:
+                    net_iface.ip_configurations[idx].access_controll_list = None
+            net_iface.commit(wait=True)
         client.AccessControlLists.remove(resource_id=acl_id)
 
     def _remove_acls(self, acl_list):
@@ -121,10 +132,17 @@ class HNVAclDriver(object):
 
     def _apply_nc_acl_rules(self, acl, rules):
         # we are syncing and we want to overwrite any existing rule.
+        if isinstance(acl, client.AccessControlLists) is False:
+            return
         default_rules = self._get_drop_all_rules()
         rules.extend(default_rules)
+        try:
+            acl.refresh()
+        except hnv_exception.NotFound:
+            # resource dissapeared while updating
+            return
         acl.acl_rules = rules
-        acl.commit(wait=True, if_match=None)
+        acl.commit(wait=True, if_match=False)
 
     def _sync_existing_sgs(self, db_sgs, nc_acls):
         for sg in db_sgs:
@@ -171,10 +189,26 @@ class HNVAclDriver(object):
         acls = client.AccessControlLists(resource_id=aggregate_id)
         return client.Resource(resource_ref=acls.resource_ref)
 
-    def _get_db_acls(self):
+    def _get_sg_ids_from_ports(self, ports):
+        if type(ports) is not dict:
+            raise ValueError("Expected dict")
+        all_sgs = set()
+        for i in ports:
+            sgs = set(ports[i].get("security_groups", []))
+            all_sgs.update(sgs)
+        as_list = list(all_sgs)
+        if len(as_list) == 0:
+            return None
+        return as_list
+
+    def _get_db_acls(self, ids=None):
         db_sg_list = {}
+        filters = {}
+        if ids:
+            filters["id"] = ids
         db_security_groups = self._plugin.get_security_groups(
-            self.admin_context)
+            self.admin_context,
+            filters=filters)
         for i in db_security_groups:
             if db_sg_list.get(i["id"]) is None:
                 db_sg_list[i["id"]] = i["security_group_rules"]
@@ -207,8 +241,14 @@ class HNVAclDriver(object):
         return ret
 
     def sync_acls(self, ports=None, departing_sgs=None):
-        nc_acls = self._get_nc_acls()
-        db_acls = self._get_db_acls()
+    #    ids = None
+    #    if ports is not None:
+    #        ids = self._get_sg_ids_from_ports(ports)
+    #        if ids is None:
+    #            # Nothing to sync (hopefully)
+    #            return
+        nc_acls = self._get_nc_acls() #(ids=ids)
+        db_acls = self._get_db_acls() #(ids=ids)
         # ACLs that need to be created in the network controller comprised
         # of the rules from multiple security groups set on a port. It's an
         # unfortunate limitation of HNV, that you are not allowed to add a
@@ -256,6 +296,8 @@ class HNVAclDriver(object):
             acl.remove(resource_id=acl.resource_id, wait=True)
             # only really relevant on delete. When adding a new SG,
             # it's not yet assigned to any VM
+            #if len(ports):
+            LOG.debug("Sync-ing ACLS for SGS belonging to %r" % ports)
             self.sync_acls(ports=ports, departing_sgs=[sg["id"],])
         return
 
@@ -272,7 +314,8 @@ class HNVAclDriver(object):
         ports = []
         for i in port_ids:
             p = self._plugin.get_port(self.admin_context, i)
-            ports.append(p)
+            if p.get("device_owner", "").startswith(const.DEVICE_OWNER_COMPUTE_PREFIX):
+                ports.append(p)
         #ports = self._plugin.get_ports(self.admin_context, filters={
         #    "id": [port_ids,]})
         return {i["id"]:i for i in ports}
@@ -450,7 +493,7 @@ class HNVAclDriver(object):
         rules = self._get_sgs_member_rules_for_port(port)
         for i in rules:
             updated_sgs.add(i.parent_id)
-            i.commit(wait=False)
+            #i.commit(wait=True)
         ports = self._get_ports_with_secgroups(list(updated_sgs))
         self.sync_acls(ports=ports)
 

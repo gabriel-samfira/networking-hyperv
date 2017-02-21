@@ -16,6 +16,7 @@ import json
 import requests
 import netaddr
 import hashlib
+from uuid import UUID
 
 from requests.status_codes import codes
 
@@ -68,6 +69,7 @@ class HNVWorker(worker.NeutronWorker):
     def start(self):
         super(HNVWorker, self).start()
         # Sync networks
+        self._driver._clear_dead_ports()
         self._driver._sync_networks()
         # Sync ACLs in network controller
         remove_acls = self._driver._acl_driver.sync_acls()
@@ -304,6 +306,26 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             self._remove_nc_port(i)
         self._create_ports_in_nc(c_to_add)
         self._sync_db_ports(c_to_sync)
+
+    def _clear_dead_ports(self):
+        nc_ports = self._get_nc_ports()
+        nc_lbs = l3.LoadBalancerManager.get_all()
+        nc_vips = l3.PublicIPAddressManager.get_all()
+        db_ports = self._get_db_ports()
+
+        gw_add, gw_remove, gw_sync = utils.diff_dictionary_keys(
+            nc_lbs, db_ports["external"])
+
+        vip_add, vip_remove, vip_sync = utils.diff_dictionary_keys(
+            nc_vips, db_ports["floating"])
+
+        c_add, c_remove, c_sync = utils.diff_dictionary_keys(
+            nc_ports, db_ports["compute"])
+
+        for i in c_remove:
+            self._remove_nc_port(i)
+        self._lb_manager.bulk_remove_by_id(gw_remove)
+        self._public_ips.bulk_remove_by_id(vip_remove) 
 
     def _get_nc_virtual_networks(self):
         networks = client.VirtualNetworks.get()
@@ -753,6 +775,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         lb_manager = client.LoadBalancerManager.get()
         network_subnets = [i.resource_id for i in network.subnetworks]
         ip_pools = [j.resource_id for i in network.subnetworks if i.ip_pools for j in i.ip_pools]
+        # TODO: add more then one ip pool
         for i in subnets:
             dns_nameservers = i.get("dns_nameservers", [])
             startIp = None
@@ -899,8 +922,31 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         if len(virtualNetwork.address_space.address_prefixes) == 0:
             virtualNetwork.address_space.address_prefixes.append(dummy_prefix)
         virtualNetwork.commit()
-        
+    
+    def _reap_dead_ports_from_subnet(self,  subnet):
+        port_ids = [i.get_resource().parent_id for i in subnet.ip_configuration]
+        if len(port_ids) == 0:
+            return
+        admin_context = n_context.get_admin_context()
+        ports = self._plugin.get_ports(admin_context, filters={
+            'id': port_ids})
+        as_keys = {i["id"]:i for i in ports}
+        for idx, ipconf in enumerate(subnet.ip_configuration):
+            ipconf = ipconf.get_resource()
+            if as_keys.get(ipconf.parent_id):
+                # port is still alive
+                # At this point there should not be any live port
+                continue
+            client.NetworkInterfaces.remove(resource_id=ipconf.parent_id)
+
     def _remove_subnet_from_virtual_network(self, network_id, subnet_id, cidr):
+        try:
+            subnet = client.SubNetworks.get(
+                    resource_id=subnet_id,parent_id=network_id)
+            self._reap_dead_ports_from_subnet(subnet)
+        except hnv_exception.NotFound:
+            return
+
         client.SubNetworks.remove(
             resource_id=subnet_id,
             parent_id=network_id,
@@ -1028,7 +1074,6 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
             # The associate action done during create is emitted as a notify.
             # is where we do the actual associate.
             self._public_ips.create(port)
-
 
     def delete_port_postcommit(self, context):
         """Delete a port.
@@ -1171,8 +1216,8 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 ip, port, cached_subnets)
             ipConfigurations.append(ipConfig)
             dns_nameservers.update(nameservers)
-        if len(ipConfigurations) == 0:
-            raise ValueError("Could not build valid IP address configurations")
+        #if len(ipConfigurations) == 0:
+        #    raise ValueError("Could not build valid IP address configurations")
         return {
             "resource_id": port["id"],
             "tags": {"provider": constants.HNV_PROVIDER_NAME},
