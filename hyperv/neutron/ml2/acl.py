@@ -32,6 +32,8 @@ ACL_PROP_MAP = {
                   'egress': "Outbound"},
     'protocol': {'tcp': "TCP",
                  'udp': "UDP",
+                 '17': "UDP",
+                 '6': "TCP",
                  'all': "All"},
     'action': {'allow': "Allow",
                'deny': "Deny"},
@@ -407,7 +409,7 @@ class HNVAclDriver(object):
     #     return (ips, ip_config_cache)
 
     def _sanitize_protocol(self, protocol):
-        if protocol in ("icmp", "ipv6-icmp", "icmpv6"):
+        if protocol in ("icmp", "ipv6-icmp", "icmpv6", "1", "58"):
             return None
         if protocol is None:
             return ACL_PROP_MAP["protocol"]["all"]

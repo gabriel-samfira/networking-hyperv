@@ -1,4 +1,6 @@
 import netaddr
+import json
+import time
 from uuid import UUID
 
 from oslo_log import log
@@ -6,13 +8,14 @@ from oslo_log import log
 from neutron_lib import constants as const
 
 from hnv import client
+from hnv.common import constant as hnv_constant
 from hnv.common import exception as hnv_exception
 from hyperv.neutron import constants
 from hyperv.common.i18n import _, _LE, _LI
 
 from neutron_lib.plugins import directory
 
-from neutron.plugins.common import constants as n_const
+from neutron_lib import constants as n_const
 from neutron import context as n_context
 from neutron.callbacks import registry
 from neutron.callbacks import resources
@@ -128,6 +131,7 @@ class LoadBalancerManager(HNVMixin):
     def __init__(self):
         self._ln_cache = {}
         self._subnet_lb_cache = {}
+        self.pub_ips = PublicIPAddressManager()
 
     def _get_logical_network(self, network_id):
         if self._ln_cache.get(network_id):
@@ -147,6 +151,7 @@ class LoadBalancerManager(HNVMixin):
             "fe-id": fe_id,
             "be-id": be_id,
             "onat-id": onat_id,
+            "vip-id": port_id,
         }
 
     def _get_frontend_ip_configurations(self, ips, resource_ids):
@@ -158,14 +163,22 @@ class LoadBalancerManager(HNVMixin):
                 raise Exception("Failed to find subnet for ip %(ip)s in "
                     "network controller" % {
                         "ip": ip["ip_address"]})
+            extra_tags = {
+                    "resource_type": "loadbalancer",
+                    "resource_id": resource_ids["lb-id"],
+            }
+            pub_ip = self.pub_ips._create_vip(resource_ids["vip-id"], ip, extra_tags=extra_tags)
+            pub_ip_resource = client.Resource(resource_ref=pub_ip.resource_ref)
             #TODO: Consider using wait=False wherever possible.
             fe = client.FrontendIPConfigurations(
                 tags={"provider": constants.HNV_PROVIDER_NAME},
                 parent_id=resource_ids["lb-id"],
                 resource_id=frontend_id,
-                subnet=ip_subnet,
-                private_ip_address=ip["ip_address"],
-                private_ip_allocation_method="Static")
+                #subnet=ip_subnet,
+                #allocation_method="Static",
+                public_ip_address=pub_ip_resource,
+                #private_ip_address=ip["ip_address"],
+                private_ip_allocation_method="Dynamic")
             ret.append(fe)
         return ret
 
@@ -220,7 +233,48 @@ class LoadBalancerManager(HNVMixin):
         #return client.LoadBalancers.get(resource_id=lb.resource_id)
 
     def _remove_load_balancer_by_id(self, lb_id):
-        client.LoadBalancers.remove(resource_id=lb_id)
+        try:
+            lb = client.LoadBalancers.get(resource_id=lb_id)
+        except hnv_exception.NotFound:
+            return
+        if lb.provisioning_state == hnv_constant.FAILED:
+            try:
+                lb = lb.commit(wait=True)
+            except Exception as err:
+                LOG.error("Failed to commit lb: %s. Attempting delete anyway. % lb_id")
+        public_ips = []
+        for i in lb.frontend_ip_configurations:
+            if i.public_ip_address:
+                public_ips.append(i.public_ip_address)
+
+        retry = 5
+        while True:
+            try:
+                client.LoadBalancers.remove(resource_id=lb_id)
+                break
+            except Exception as err:
+                LOG.error("Failed to remove load balancer: %s" % err)
+                retry += 1
+                if retry >= 5:
+                    try:
+                        lb = client.LoadBalancers.get(resource_id=lb_id)
+                        LOG.info("LB state: %s" % json.dumps(lb.dump(), indent=2))
+                    except hnv_exception.NotFound:
+                        for i in public_ips:
+                            try:
+                                ip = i.get_resource()
+                                ip.remove(resource_id=ip.resource_id)
+                            except hnv_exception.NotFound:
+                                pass
+                        return
+                    raise err
+                time.sleep(1)
+        for i in public_ips:
+            try:
+                ip = i.get_resource()
+                ip.remove(resource_id=ip.resource_id)
+            except hnv_exception.NotFound:
+                pass
 
     def _remove_load_balancer(self, port):
         resource_ids = self._get_resource_ids(port)
@@ -300,14 +354,14 @@ class LoadBalancerManager(HNVMixin):
     def create(cls, port):
         obj = cls()
         retry = 3
-        while True:
-            try:
-                return obj._create_load_balancer(port)
-            except Exception as err:
-                if retry < 1:
-                    raise err
-                retry = retry - 1
-                obj._remove_load_balancer(port)
+        #while True:
+            #try:
+        return obj._create_load_balancer(port)
+            #except Exception as err:
+            #    if retry < 1:
+            #        raise err
+            #    retry = retry - 1
+            #    obj._remove_load_balancer(port)
         
     @classmethod
     def remove(cls, port):
@@ -336,38 +390,72 @@ class PublicIPAddressManager(HNVMixin):
             raise ValueError("Port does not have device ID assigned")
         return vip_id
 
-    def _create(self, port):
-        vip_id = self._get_vip_id(port)
-        ips = port.get("fixed_ips")
-        if len(ips) == 0:
-            LOG.debug("No fixed_ips to work with")
-            return
-        try:
-            public_ip = client.PublicIPAddresses.get(resource_id=vip_id)
-            return public_ip
-        except hnv_exception.NotFound:
-            LOG.debug("Creating public IP address %(public_ip)s" % {
-                'public_ip': ips[0]["ip_address"]})
-        # There should be only one floating IP on
-        # a port
-        subnet = self._get_lnsubnet_for_ip(ips[0])
+    def _create_vip(self, vip_id, address, extra_tags=None):
+        all_ips = self.get_all()
+        if all_ips.get(vip_id):
+            return all_ips[vip_id]
+        for i in all_ips:
+            if all_ips[i].ip_address == address["ip_address"]:
+                raise ValueError("IP address %s is already allocated ro resource %s" % (address["ip_address"], i))
+
+        subnet = self._get_lnsubnet_for_ip(address)
         if not subnet:
             raise Exception("Failed to find subnet for ip %(ip)s in "
-                "network controller" % {"ip": ip["ip_address"]})
+                "network controller" % {"ip": address["ip_address"]})
         public_ip=None
         try:
+            tags = {
+                    "provider": constants.HNV_PROVIDER_NAME,
+                    "resource_type": "floatingip",
+                    }
+            if extra_tags:
+                tags.update(extra_tags)
             public_ip = client.PublicIPAddresses(
-                tags={"provider": constants.HNV_PROVIDER_NAME},
+                tags=tags,
                 resource_id=vip_id,
-                ip_address=ips[0]["ip_address"],
+                ip_address=address["ip_address"],
                 allocation_method="Static",
                 idle_timeout=4)
             LOG.debug("Creating public ip with payload: %r" % public_ip.dump())
             public_ip = public_ip.commit(wait=True)
         except Exception as err:
             LOG.error("Failed to create public IP: %r" % public_ip.dump())
-            raise err
-        return public_ip
+            raise err 
+        return public_ip 
+
+    def _create(self, port):
+        vip_id = self._get_vip_id(port)
+        ips = port.get("fixed_ips")
+        if len(ips) == 0:
+            LOG.debug("No fixed_ips to work with")
+            return
+        return self._create_vip(vip_id, ips[0])
+        #try:
+        #    public_ip = client.PublicIPAddresses.get(resource_id=vip_id)
+        #    return public_ip
+        #except hnv_exception.NotFound:
+        #    LOG.debug("Creating public IP address %(public_ip)s" % {
+        #        'public_ip': ips[0]["ip_address"]})
+        ## There should be only one floating IP on
+        ## a port
+        #subnet = self._get_lnsubnet_for_ip(ips[0])
+        #if not subnet:
+        #    raise Exception("Failed to find subnet for ip %(ip)s in "
+        #        "network controller" % {"ip": ip["ip_address"]})
+        #public_ip=None
+        #try:
+        #    public_ip = client.PublicIPAddresses(
+        #        tags={"provider": constants.HNV_PROVIDER_NAME},
+        #        resource_id=vip_id,
+        #        ip_address=ips[0]["ip_address"],
+        #        allocation_method="Static",
+        #        idle_timeout=4)
+        #    LOG.debug("Creating public ip with payload: %r" % public_ip.dump())
+        #    public_ip = public_ip.commit(wait=True)
+        #except Exception as err:
+        #    LOG.error("Failed to create public IP: %r" % public_ip.dump())
+        #    raise err
+        #return public_ip
 
     def _delete_by_id(self, vip_id, fixed_ips=None):
         ips = fixed_ips
@@ -375,6 +463,11 @@ class PublicIPAddressManager(HNVMixin):
             vip = client.PublicIPAddresses.get(resource_id=vip_id)
         except hnv_exception.NotFound:
             return
+        if vip.provisioning_state == hnv_constant.FAILED:
+            try:
+                vip = vip.commit(wait=True)
+            except Exception as err:
+                LOG.error("Failed to commit vip %s. Attempting to remove anyway." % vip_id)
         if vip.ip_configuration:
             # if we get here, it means that neutron has already
             # dissassociated this IP address from its ports and
@@ -386,7 +479,22 @@ class PublicIPAddressManager(HNVMixin):
             if ips:
                 args["floating_ip_address"] = ips[0]["ip_address"]
             self._disassociate_public_ip(args)
-        vip.remove(resource_id=vip.resource_id)
+        retry = 0
+        while True:
+            try:
+                vip.remove(resource_id=vip.resource_id)
+                break
+            except Exception as err:
+                LOG.error("Error deleting VIP: %s" % err)
+                retry += 1
+                if retry >= 5:
+                    try:
+                        vip = client.PublicIPAddresses.get(resource_id=vip_id)
+                        LOG.info("VIP state: %s" % json.dumps(vip.dump(), indent=2))
+                    except hnv_exception.NotFound:
+                        return
+                    raise err
+                time.sleep(1)
 
     def _delete(self, port):
         vip_id = self._get_vip_id(port)
@@ -410,6 +518,7 @@ class PublicIPAddressManager(HNVMixin):
         vip_obj = self._get_vip(vip_id, vip_address)
         vip_resource_ref = client.Resource(resource_ref=vip_obj.resource_ref)
         net_adapter = client.NetworkInterfaces.get(resource_id=net_adapter_id)
+        LOG.debug("Attempting to associate ip with data: %s on iface: %s" % (json.dumps(vip_obj.dump(), indent=2), json.dumps(net_adapter.dump(), indent=2)))
         found = False
         for idx, val in enumerate(net_adapter.ip_configurations):
             if net_adapter.ip_configurations[idx].private_ip_address == dip:
@@ -421,7 +530,12 @@ class PublicIPAddressManager(HNVMixin):
                 "%(network_interface)s" % {
                 'dip': dip,
                 'network_interface': net_adapter_id})
-        return net_adapter.commit(wait=True)
+        try:
+            net_adapter = net_adapter.commit(wait=True)
+        except Exception as err:
+            LOG.error("Error associating public IP: %s. iface: %s" % (err, json.dumps(net_adapter.dump(), indent=2)))
+            raise err
+        return net_adapter
 
     def _disassociate_public_ip(self, assoc_data):
         vip_address = assoc_data.get("floating_ip_address")
@@ -431,15 +545,37 @@ class PublicIPAddressManager(HNVMixin):
             return
 
         ip = vip_obj.ip_configuration.get_resource()
-        net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
-        for idx, i in enumerate(net_iface.ip_configurations):
-            if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
-                resource = vip_obj.ip_configuration
-                pub_ip = net_iface.ip_configurations[idx].public_ip_address
-                if pub_ip:
-                    net_iface.ip_configurations[idx].public_ip_address = None
+        LOG.debug("IP object for disassociation: %s" % json.dumps(ip.dump(), indent=2))
+        retry = 0
+        while True:
+            try:
+                LOG.debug("Fetching net iface for IP %s. Parent ID is: %s" % (ip.resource_id, ip.parent_id))
+                net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
+            except hnv_exception.NotFound:
+                LOG.debug("Net iface for IP %s not found" % ip.resource_id)
+                return
+            LOG.debug("Found net iface %s for IP %s" % (json.dumps(net_iface.dump(), indent=2), ip.resource_id))
+            for idx, i in enumerate(net_iface.ip_configurations):
+                if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
+                    resource = vip_obj.ip_configuration
+                    pub_ip = net_iface.ip_configurations[idx].public_ip_address
+                    if pub_ip:
+                        net_iface.ip_configurations[idx].public_ip_address = None
+                    break
+            try:
+                net_iface.commit(wait=True)
                 break
-        net_iface.commit(wait=True)
+            except Exception as err:
+                LOG.error("Failed to update NC port: %s" % err)
+                retry += 1
+                if retry >= 5:
+                    try:
+                        net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
+                        LOG.info("Net iface state; %s" % json.dumps(net_iface.dump(), indent=2))
+                    except hnv_exception.NotFound:
+                        return
+                    raise err
+                time.sleep(1)
 
     def get_vip_for_internal_port(self, port, ip):
         port_id = port["id"]
@@ -455,7 +591,7 @@ class PublicIPAddressManager(HNVMixin):
         return resource
 
     @classmethod
-    def get_all(self):
+    def get_all(cls):
         vips = client.PublicIPAddresses.get()
         ret = {}
         for i in vips:
@@ -492,15 +628,15 @@ class PublicIPAddressManager(HNVMixin):
             return
         obj = cls()
         retry = 3
-        while True:
-            try:
-                obj._create(port)
-                return
-            except Exception as err:
-                if retry < 1:
-                    raise err
-                retry = retry - 1
-                obj._delete(port)
+        #while True:
+        #    try:
+        obj._create(port)
+        #        return
+        #    except Exception as err:
+        #        if retry < 1:
+        #            raise err
+        #        retry = retry - 1
+        #        obj._delete(port)
 
     @classmethod
     def remove(cls, port):
@@ -547,7 +683,7 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         self.update_floatingip_status(self._admin_context, fip, status)
 
     def get_plugin_type(self):
-        return n_const.L3_ROUTER_NAT
+        return n_const.L3
 
     def get_plugin_description(self):
         """returns string description of the plugin."""
@@ -580,19 +716,24 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
                         ip_configurations.append(ip)
         return ip_configurations
 
-    def _apply_lb_on_ip_configs(self, ip_configs, lb):
+    def _apply_lb_on_ip_configs(self, ip_configs, lb=None):
         for cfg in ip_configs:
             ip = cfg.get_resource()
             net_iface = client.NetworkInterfaces.get(resource_id=ip.parent_id)
             for idx, i in enumerate(net_iface.ip_configurations):
                 if net_iface.ip_configurations[idx].resource_id == ip.resource_id:
-                    resource = client.Resource(
-                        resource_ref=lb.backend_address_pools[0].resource_ref)
-                    net_iface.ip_configurations[idx].backend_address_pools.append(resource)
+                    if lb:
+                        resource = client.Resource(
+                            resource_ref=lb.backend_address_pools[0].resource_ref)
+                    pools = net_iface.ip_configurations[idx].backend_address_pools
+                    if lb and lb not in pools:
+                        net_iface.ip_configurations[idx].backend_address_pools.append(lb)
+                    if lb is None:
+                        net_iface.ip_configurations[idx].backend_address_pools = None
                     break
             net_iface.commit(wait=True)
 
-    def _apply_lb_on_connected_networks(self, router_interfaces, lb):
+    def _apply_lb_on_connected_networks(self, router_interfaces, lb=None):
         subnets = []
         for i in router_interfaces:
             info = self._get_subnet_info_from_interface(i)
@@ -615,10 +756,10 @@ class HNVL3RouterPlugin(service_base.ServicePluginBase,
         if external_port == original_gw:
             return updated
         router_id = updated["id"]
+        router_interfaces = self._get_attached_router_interfaces(context, router_id)
         if external_port:
-            router_interfaces = self._get_attached_router_interfaces(context, router_id)
             lb = self._get_lb_for_router(updated)
-            self._apply_lb_on_connected_networks(router_interfaces, lb)
+        self._apply_lb_on_connected_networks(router_interfaces, lb)
         return updated
 
     def add_router_interface(self, context, router_id, interface_info):

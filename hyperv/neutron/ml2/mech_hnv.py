@@ -16,6 +16,7 @@ import json
 import requests
 import netaddr
 import hashlib
+import time
 from uuid import UUID
 
 from requests.status_codes import codes
@@ -30,6 +31,8 @@ from neutron.callbacks import resources
 from neutron_lib import exceptions as n_exc
 from neutron_lib import constants as const
 from neutron_lib.plugins import directory
+
+from hnv.common import constant as hnv_constant
 
 from neutron.plugins.ml2 import driver_api
 from neutron.plugins.common import constants as plugin_const
@@ -180,8 +183,32 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
     #def set_port_status_down(self, port_id):
     #    pass
 
-    def _remove_nc_port(self, port):
-        client.NetworkInterfaces.remove(resource_id=port, wait=True)
+    def _remove_nc_port(self, port_id):
+        try:
+            port = client.NetworkInterfaces.get(resource_id=port_id)
+        except hnv_exception.NotFound:
+            return
+        if port.provisioning_state == hnv_constant.FAILED:
+            try:
+                port = port.commit(wait=True)
+            except Exception as err:
+                LOG.error("Failed to commit port: %s. Will try to delete anyway" % port_id)
+        retry = 0
+        while True:
+            try:
+                client.NetworkInterfaces.remove(resource_id=port_id, wait=True)
+                break
+            except Exception as err:
+                LOG.error("Error while deleting port: %s" % err)
+                retry += 1
+                if retry >= 5:
+                    try:
+                        port = client.NetworkInterfaces.get(resource_id=port_id)
+                        LOG.info("Port state: %s" % json.dumps(port.dump(), indent=2))
+                    except hnv_exception.NotFound:
+                        return
+                    raise err
+                time.sleep(1)
 
     def _remove_nc_ports(self, ports):
         if type(ports) is not list:
@@ -272,17 +299,42 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                 ports[section][p_id] = i
         return ports
 
+    def _filter_vips_by_resource_type(self, vips, resource_type):
+        ret = {}
+        for i in vips:
+            if vips[i].tags.get("resource_type") == resource_type:
+                ret[i] = vips[i]
+        return ret
+
+    def _clean_orphan_lb_public_ips(self, lbs, vips):
+        to_remove = []
+        for i in vips:
+            if vips[i].tags.get("resource_type") != "loadbalancer":
+                continue
+            res_id = vips[i].tags.get("resource_id")[3:]
+            if res_id is None:
+                continue
+            LOG.info("lb_id: %s --> vip_lb_id: %r" % (res_id, lbs.keys()))
+            if res_id not in lbs:
+                to_remove.append(vips[i])
+        for i in to_remove:
+            i.remove(resource_id=i.resource_id)
+
     def _sync_ports(self):
         nc_ports = self._get_nc_ports()
         nc_lbs = l3.LoadBalancerManager.get_all()
         nc_vips = l3.PublicIPAddressManager.get_all()
+        floating = self._filter_vips_by_resource_type(nc_vips, "floatingip")
+        lb_ips = self._filter_vips_by_resource_type(nc_vips, "loadbalancer")
+        self._clean_orphan_lb_public_ips(nc_lbs, lb_ips)
+
         db_ports = self._get_db_ports()
 
         gw_add, gw_remove, gw_sync = utils.diff_dictionary_keys(
             nc_lbs, db_ports["external"])
 
         vip_add, vip_remove, vip_sync = utils.diff_dictionary_keys(
-            nc_vips, db_ports["floating"])
+            floating, db_ports["floating"])
 
         c_add, c_remove, c_sync = utils.diff_dictionary_keys(
             nc_ports, db_ports["compute"])
@@ -311,13 +363,14 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         nc_ports = self._get_nc_ports()
         nc_lbs = l3.LoadBalancerManager.get_all()
         nc_vips = l3.PublicIPAddressManager.get_all()
+        floating = self._filter_vips_by_resource_type(nc_vips, "floatingip")
         db_ports = self._get_db_ports()
 
         gw_add, gw_remove, gw_sync = utils.diff_dictionary_keys(
             nc_lbs, db_ports["external"])
 
         vip_add, vip_remove, vip_sync = utils.diff_dictionary_keys(
-            nc_vips, db_ports["floating"])
+            floating, db_ports["floating"])
 
         c_add, c_remove, c_sync = utils.diff_dictionary_keys(
             nc_ports, db_ports["compute"])
@@ -1023,7 +1076,7 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                         'network': network.current["id"],
                         }
                     )
-            self._create_ports_in_nc(port)
+            self.update_port(port)
         else:
             manager = l3.get_manager(port)
             if manager:
@@ -1156,8 +1209,19 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
                     {constants.HNV_PORT_PROFILE_ID: instance_id})
             return instance_id
         port_details = self.get_port_details(port)
+        LOG.debug("Pre-Update port: %s" % json.dumps(nc_port.dump(), indent=2))
         nc_port.update(port_details)
-        nc_port.commit(wait=True)
+        LOG.debug("Post-Update port: %s" % json.dumps(nc_port.dump(), indent=2))
+        retry = 0
+        while True:
+            try:
+                nc_port = nc_port.commit(wait=True)
+                break
+            except Exception as err:
+                LOG.error("Error trying to commit port: %s. Retrying" % err)
+                retry += 1
+                if retry >= 5:
+                    raise err
         return nc_port.instance_id
 
     def _confirm_ip_in_subnet(self, ip, subnet):
@@ -1233,12 +1297,24 @@ class HNVMechanismDriver(driver_api.MechanismDriver):
         networkInterface = client.NetworkInterfaces(**port_options)
         LOG.debug("Attempting to create network interface for %(port_id)s : %(payload)r" % {
             'port_id': port["id"],
-            'payload': networkInterface,
+            'payload': networkInterface.dump(),
             })
         try:
             networkInterface = networkInterface.commit(wait=True)
+        except hnv_exception.ServiceException as err:
+            LOG.error("NC returned exception: %s. Attempting to recover" % err)
+            retry = 0
+            while True:
+                try:
+                    networkInterface = networkInterface.commit(wait=True)
+                    break
+                except Exception as err:
+                    LOG.error("Got error while trying to commit: %s" % err)
+                    retry += 1
+                if retry >= 5:
+                    raise err
         except Exception as err:
-            LOG.debug("Got error %r" % err.response.content)
+            LOG.debug("Got error %r" % err)
             raise err
         return networkInterface.instance_id
 
